@@ -85,11 +85,11 @@ RUN powershell zstd -d $Env:TEMP\libxxhash-0.8.1-1-x86_64.pkg.tar.zst -o $Env:TE
 RUN powershell mkdir "C:\LibXXHash"
 RUN powershell tar -xvf $Env:TEMP\libxxhash-0.8.1-1-x86_64.pkg.tar -C "C:\LibXXHash"
 
-# Install libzstd 1.5.4 needed for rsync 3.2.7.
-RUN powershell Invoke-WebRequest -Uri https://repo.msys2.org/msys/x86_64/libzstd-1.5.4-1-x86_64.pkg.tar.zst -OutFile $Env:TEMP\libzstd-1.5.4-1-x86_64.pkg.tar.zst
-RUN powershell zstd -d $Env:TEMP\libzstd-1.5.4-1-x86_64.pkg.tar.zst -o $Env:TEMP\libzstd-1.5.4-1-x86_64.pkg.tar
+# Install libzstd 1.5.6 needed for rsync 3.2.7.
+RUN powershell Invoke-WebRequest -Uri https://repo.msys2.org/msys/x86_64/libzstd-1.5.6-1-x86_64.pkg.tar.zst -OutFile $Env:TEMP\libzstd-1.5.6-1-x86_64.pkg.tar.zst
+RUN powershell zstd -d $Env:TEMP\libzstd-1.5.6-1-x86_64.pkg.tar.zst -o $Env:TEMP\libzstd-1.5.6-1-x86_64.pkg.tar
 RUN powershell mkdir "C:\LibZStd"
-RUN powershell tar -xvf $Env:TEMP\libzstd-1.5.4-1-x86_64.pkg.tar -C "C:\LibZStd"
+RUN powershell tar -xvf $Env:TEMP\libzstd-1.5.6-1-x86_64.pkg.tar -C "C:\LibZStd"
 
 # Install rsync 3.2.7.
 RUN powershell Invoke-WebRequest -Uri https://repo.msys2.org/msys/x86_64/rsync-3.2.7-2-x86_64.pkg.tar.zst -OutFile $Env:TEMP\rsync-3.2.7-2-x86_64.pkg.tar.zst
