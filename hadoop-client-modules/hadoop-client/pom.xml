@@ -62,20 +62,8 @@
           <artifactId>servlet-api-2.5</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-core</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.github.pjfanning</groupId>
-          <artifactId>jersey-json</artifactId>
-        </exclusion>
-        <exclusion>
           <groupId>org.codehaus.jettison</groupId>
           <artifactId>jettison</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-server</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.eclipse.jdt</groupId>
@@ -118,18 +106,6 @@
           <groupId>org.eclipse.jetty</groupId>
           <artifactId>jetty-server</artifactId>
         </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-core</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-server</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>javax.servlet</groupId>
-          <artifactId>javax.servlet-api</artifactId>
-        </exclusion>
       </exclusions>
     </dependency>
 
@@ -147,32 +123,12 @@
           <artifactId>guice</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>com.sun.jersey.jersey-test-framework</groupId>
-          <artifactId>jersey-test-framework-grizzly2</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-server</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey.contribs</groupId>
-          <artifactId>jersey-guice</artifactId>
-        </exclusion>
-        <exclusion>
           <groupId>com.google.inject.extensions</groupId>
           <artifactId>guice-servlet</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.apache.avro</groupId>
           <artifactId>avro</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-core</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.github.pjfanning</groupId>
-          <artifactId>jersey-json</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.codehaus.jettison</groupId>
@@ -214,28 +170,12 @@
           <artifactId>commons-cli</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>log4j</groupId>
-          <artifactId>log4j</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-core</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-server</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.github.pjfanning</groupId>
-          <artifactId>jersey-json</artifactId>
+          <groupId>ch.qos.reload4j</groupId>
+          <artifactId>reload4j</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.codehaus.jettison</groupId>
           <artifactId>jettison</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-servlet</artifactId>
         </exclusion>
         <exclusion>
           <groupId>io.netty</groupId>
@@ -263,18 +203,6 @@
           <artifactId>guice</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>com.sun.jersey.jersey-test-framework</groupId>
-          <artifactId>jersey-test-framework-grizzly2</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey</groupId>
-          <artifactId>jersey-server</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.sun.jersey.contribs</groupId>
-          <artifactId>jersey-guice</artifactId>
-        </exclusion>
-        <exclusion>
           <groupId>org.apache.avro</groupId>
           <artifactId>avro</artifactId>
         </exclusion>
@@ -287,21 +215,12 @@
           <artifactId>guice-servlet</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>com.github.pjfanning</groupId>
-          <artifactId>jersey-json</artifactId>
-        </exclusion>
-        <exclusion>
           <groupId>org.codehaus.jettison</groupId>
           <artifactId>jettison</artifactId>
         </exclusion>
         <exclusion>
           <groupId>io.netty</groupId>
           <artifactId>netty</artifactId>
-        </exclusion>
-        <!-- No slf4j backends for downstream clients -->
-        <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-log4j12</artifactId>
         </exclusion>
       </exclusions>
     </dependency>
@@ -330,11 +249,6 @@
         <exclusion>
           <groupId>io.netty</groupId>
           <artifactId>netty</artifactId>
-        </exclusion>
-        <!-- No slf4j backends for downstream clients -->
-        <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-log4j12</artifactId>
         </exclusion>
       </exclusions>
     </dependency>

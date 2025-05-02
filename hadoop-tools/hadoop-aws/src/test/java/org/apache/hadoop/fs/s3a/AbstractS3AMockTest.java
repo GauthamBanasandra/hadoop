@@ -35,8 +35,7 @@ import org.junit.rules.ExpectedException;
 
 
 /**
- * Abstract base class for S3A unit tests using a mock S3 client and a null
- * metadata store.
+ * Abstract base class for S3A unit tests using a mock S3 client.
  */
 public abstract class AbstractS3AMockTest {
 
@@ -55,10 +54,11 @@ public abstract class AbstractS3AMockTest {
 
   protected S3AFileSystem fs;
   protected S3Client s3;
+  protected Configuration conf;
 
   @Before
   public void setup() throws Exception {
-    Configuration conf = createConfiguration();
+    conf = createConfiguration();
     fs = new S3AFileSystem();
     URI uri = URI.create(FS_S3A + "://" + BUCKET);
     // unset S3CSE property from config to avoid pathIOE.
@@ -81,6 +81,15 @@ public abstract class AbstractS3AMockTest {
     conf.setInt(ASYNC_DRAIN_THRESHOLD, Integer.MAX_VALUE);
     // set the region to avoid the getBucketLocation on FS init.
     conf.set(AWS_REGION, "eu-west-1");
+
+    // tight retry logic as all failures are simulated
+    final String interval = "1ms";
+    final int limit = 3;
+    conf.set(RETRY_THROTTLE_INTERVAL, interval);
+    conf.setInt(RETRY_THROTTLE_LIMIT, limit);
+    conf.set(RETRY_INTERVAL, interval);
+    conf.setInt(RETRY_LIMIT, limit);
+
     return conf;
   }
 

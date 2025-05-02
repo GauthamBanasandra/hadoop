@@ -48,6 +48,16 @@ There are multiple ways to connect to an S3 bucket
 
 The S3A connector supports all these; S3 Endpoints are the primary mechanism used -either explicitly declared or automatically determined from the declared region of the bucket.
 
+The S3A connector supports S3 cross region access via AWS SDK which is enabled by default. This allows users to access S3 buckets in a different region than the one defined in the S3 endpoint/region configuration, as long as they are within the same AWS partition. However, S3 cross-region access can be disabled by:
+```xml
+<property>
+  <name>fs.s3a.cross.region.access.enabled</name>
+  <value>false</value>
+  <description>S3 cross region access</description>
+</property>
+```
+
+
 Not supported:
 * AWS [Snowball](https://aws.amazon.com/snowball/).
 
@@ -74,7 +84,8 @@ There are three core settings to connect to an S3 store, endpoint, region and wh
   <name>fs.s3a.endpoint</name>
   <description>AWS S3 endpoint to connect to. An up-to-date list is
     provided in the AWS Documentation: regions and endpoints. Without this
-    property, the standard region (s3.amazonaws.com) is assumed.
+    property, the endpoint/hostname of the S3 Store is inferred from
+    the value of fs.s3a.endpoint.region, fs.s3a.endpoint.fips and more.
   </description>
 </property>
 
@@ -99,11 +110,59 @@ With the move to the AWS V2 SDK, there is more emphasis on the region, set by th
 
 Normally, declaring the region in `fs.s3a.endpoint.region` should be sufficient to set up the network connection to correctly connect to an AWS-hosted S3 store.
 
+### <a name="s3_endpoint_region_details"></a> S3 endpoint and region settings in detail
+
+* Configs `fs.s3a.endpoint` and `fs.s3a.endpoint.region` are used to set values
+  for S3 endpoint and region respectively.
+* If `fs.s3a.endpoint.region` is configured with valid AWS region value, S3A will
+  configure the S3 client to use this value. If this is set to a region that does
+  not match your bucket, you will receive a 301 redirect response.
+* If `fs.s3a.endpoint.region` is not set and `fs.s3a.endpoint` is set with valid
+  endpoint value, S3A will attempt to parse the region from the endpoint and
+  configure S3 client to use the region value.
+* If both `fs.s3a.endpoint` and `fs.s3a.endpoint.region` are not set, S3A will
+  use `us-east-2` as default region and enable cross region access. In this case,
+  S3A does not attempt to override the endpoint while configuring the S3 client.
+* If `fs.s3a.endpoint` is not set and `fs.s3a.endpoint.region` is set to an empty
+  string, S3A will configure S3 client without any region or endpoint override.
+  This will allow fallback to S3 SDK region resolution chain. More details
+  [here](https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/region-selection.html).
+* If `fs.s3a.endpoint` is set to central endpoint `s3.amazonaws.com` and
+  `fs.s3a.endpoint.region` is not set, S3A will use `us-east-2` as default region
+  and enable cross region access. In this case, S3A does not attempt to override
+  the endpoint while configuring the S3 client.
+* If `fs.s3a.endpoint` is set to central endpoint `s3.amazonaws.com` and
+  `fs.s3a.endpoint.region` is also set to some region, S3A will use that region
+  value and enable cross region access. In this case, S3A does not attempt to
+  override the endpoint while configuring the S3 client.
+
+When the cross region access is enabled while configuring the S3 client, even if the
+region set is incorrect, S3 SDK determines the region. This is done by making the
+request, and if the SDK receives 301 redirect response, it determines the region at
+the cost of a HEAD request, and caches it.
+
+Please note that some endpoint and region settings that require cross region access
+are complex and improving over time. Hence, they may be considered unstable.
+
+If you are working with third party stores, please check [third party stores in detail](third_party_stores.html).
+
 ### <a name="timeouts"></a> Network timeouts
 
 See [Timeouts](performance.html#timeouts).
 
-### <a name="networking"></a> Low-level Network Options
+### <a name="networking"></a> Low-level Network/Http Options
+
+The S3A connector uses [Apache HttpClient](https://hc.apache.org/index.html) to connect to
+S3 Stores.
+The client is configured to create a pool of HTTP connections with S3, so that once
+the initial set of connections have been made they can be re-used for followup operations.
+
+Core aspects of pool settings are:
+* The pool size is set by `fs.s3a.connection.maximum` -if a process asks for more connections than this then
+  threads will be blocked until they are available.
+* The time blocked before an exception is raised is set in `fs.s3a.connection.acquisition.timeout`.
+* The time an idle connection will be kept in the pool is set by `fs.s3a.connection.idle.time`.
+* The time limit for even a non-idle connection to be kept open is set in `fs.s3a.connection.ttl`.
 
 ```xml
 
@@ -113,6 +172,69 @@ See [Timeouts](performance.html#timeouts).
   <description>Controls the maximum number of simultaneous connections to S3.
     This must be bigger than the value of fs.s3a.threads.max so as to stop
     threads being blocked waiting for new HTTPS connections.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.acquisition.timeout</name>
+  <value>60s</value>
+  <description>
+    Time to wait for an HTTP connection from the pool.
+    Too low: operations fail on a busy process.
+    When high, it isn't obvious that the connection pool is overloaded,
+    simply that jobs are slow.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.request.timeout</name>
+  <value>60s</value>
+  <description>
+    Total time for a single request to take from the HTTP verb to the
+    response from the server.
+    0 means "no limit"
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.part.upload.timeout</name>
+  <value>15m</value>
+  <description>
+    Timeout for uploading all of a small object or a single part
+    of a larger one.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.ttl</name>
+  <value>5m</value>
+  <description>
+    Expiration time of an Http connection from the connection pool:
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.idle.time</name>
+  <value>60s</value>
+  <description>
+    Time for an idle HTTP connection to be kept the HTTP connection
+    pool before being closed.
+    Too low: overhead of creating connections.
+    Too high, risk of stale connections and inability to use the
+    adaptive load balancing of the S3 front end.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.expect.continue</name>
+  <value>true</value>
+  <description>
+    Should PUT requests await a 100 CONTINUE responses before uploading
+    data?
+    This should normally be left alone unless a third party store which
+    does not support it is encountered, or file upload over long
+    distance networks time out.
+    (see HADOOP-19317 as an example)
   </description>
 </property>
 
@@ -230,8 +352,9 @@ S3 endpoint, documented [by Amazon](http://docs.aws.amazon.com/general/latest/gr
 use local buckets and local copies of data, wherever possible.
 2. With the V4 signing protocol, AWS requires the explicit region endpoint
 to be used —hence S3A must be configured to use the specific endpoint. This
-is done in the configuration option `fs.s3a.endpoint`.
-3. All endpoints other than the default endpoint only support interaction
+is done by setting the regon in the configuration option `fs.s3a.endpoint.region`,
+or by explicitly setting `fs.s3a.endpoint` and `fs.s3a.endpoint.region`.
+3. All endpoints other than the default region only support interaction
 with buckets local to that S3 instance.
 4. Standard S3 buckets support "cross-region" access where use of the original `us-east-1`
    endpoint allows access to the data, but newer storage types, particularly S3 Express are
@@ -246,27 +369,13 @@ a bucket.
 The up to date list of regions is [Available online](https://docs.aws.amazon.com/general/latest/gr/s3.html).
 
 This list can be used to specify the endpoint of individual buckets, for example
-for buckets in the central and EU/Ireland endpoints.
+for buckets in the us-west-2 and EU/Ireland endpoints.
+
 
 ```xml
 <property>
-  <name>fs.s3a.bucket.landsat-pds.endpoint</name>
-  <value>s3-us-west-2.amazonaws.com</value>
-</property>
-
-<property>
-  <name>fs.s3a.bucket.eu-dataset.endpoint</name>
-  <value>s3.eu-west-1.amazonaws.com</value>
-</property>
-```
-
-Declaring the region for the data is simpler, as it avoid having to look up the full URL and having to worry about historical quirks of regional endpoint hostnames.
-
-```xml
-<property>
-  <name>fs.s3a.bucket.landsat-pds.endpoint.region</name>
+  <name>fs.s3a.bucket.us-west-2-dataset.endpoint.region</name>
   <value>us-west-2</value>
-  <description>The endpoint for s3a://landsat-pds URLs</description>
 </property>
 
 <property>
@@ -329,14 +438,24 @@ The boolean option `fs.s3a.endpoint.fips` (default `false`) switches the S3A con
 For a single bucket:
 ```xml
 <property>
-  <name>fs.s3a.bucket.landsat-pds.endpoint.fips</name>
+  <name>fs.s3a.bucket.noaa-isd-pds.endpoint.fips</name>
   <value>true</value>
-  <description>Use the FIPS endpoint for the landsat dataset</description>
+  <description>Use the FIPS endpoint for the NOAA dataset</description>
 </property>
 ```
 
-If this option is `true`, the endpoint option `fs.s3a.endpoint` MUST NOT be set:
+If `fs.s3a.endpoint.fips` is `true`, the endpoint option `fs.s3a.endpoint` MUST NOT be set to
+any non-central endpoint value. If `fs.s3a.endpoint.fips` is `true`, the only *optionally* allowed
+value for `fs.s3a.endpoint` is central endpoint `s3.amazonaws.com`.
 
+S3A error message if `s3.eu-west-2.amazonaws.com` endpoint is used with FIPS:
+```
+Non central endpoint cannot be set when fs.s3a.endpoint.fips is true : https://s3.eu-west-2.amazonaws.com
+```
+
+S3A validation is used to fail-fast before the SDK returns error.
+
+AWS SDK error message if S3A does not fail-fast:
 ```
 A custom endpoint cannot be combined with FIPS: https://s3.eu-west-2.amazonaws.com
 ```
@@ -353,6 +472,9 @@ Received an UnknownHostException when attempting to interact with a service.
     example-london-1.s3-fips.eu-west-2.amazonaws.com
 
 ```
+
+For more details on endpoint and region settings, please check
+[S3 endpoint and region settings in detail](connecting.html#s3_endpoint_region_details).
 
 *Important* OpenSSL and FIPS endpoints
 
@@ -421,7 +543,6 @@ bucket by bucket basis i.e. `fs.s3a.bucket.{YOUR-BUCKET}.accesspoint.required`.
 ```
 
 Before using Access Points make sure you're not impacted by the following:
-- `ListObjectsV1` is not supported, this is also deprecated on AWS S3 for performance reasons;
 - The endpoint for S3 requests will automatically change to use
 `s3-accesspoint.REGION.amazonaws.{com | com.cn}` depending on the Access Point ARN. While
 considering endpoints, if you have any custom signers that use the host endpoint property make
@@ -438,6 +559,90 @@ If `storediag` doesn't connect to your S3 store, *nothing else will*.
 
 Based on the experience of people who field support calls, here are
 some of the main connectivity issues which cause problems.
+
+### <a name="Not-enough-connections"></a> Connection pool overloaded
+
+If more connections are needed than the HTTP connection pool has,
+then worker threads will block until one is freed.
+
+If the wait exceeds the time set in `fs.s3a.connection.acquisition.timeout`,
+the operation will fail with `"Timeout waiting for connection from pool`.
+
+This may be retried, but time has been lost, which results in slower operations.
+If queries suddenly gets slower as the number of active operations increase,
+then this is a possible cause.
+
+Fixes:
+
+Increase the value of `fs.s3a.connection.maximum`.
+This is the general fix on query engines such as Apache Spark, and Apache Impala
+which run many workers threads simultaneously, and do not keep files open past
+the duration of a single task within a larger query.
+
+It can also surface with applications which deliberately keep files open
+for extended periods.
+These should ideally call `unbuffer()` on the input streams.
+This will free up the connection until another read operation is invoked -yet
+still re-open faster than if `open(Path)` were invoked.
+
+Applications may also be "leaking" http connections by failing to
+`close()` them. This is potentially fatal as eventually the connection pool
+can get exhausted -at which point the program will no longer work.
+
+This can only be fixed in the application code: it is _not_ a bug in
+the S3A filesystem.
+
+1. Applications MUST call `close()` on an input stream when the contents of
+   the file are longer needed.
+2. If long-lived applications eventually fail with unrecoverable
+   `ApiCallTimeout` exceptions, they are not doing so.
+
+To aid in identifying the location of these leaks, when a JVM garbage
+collection releases an unreferenced `S3AInputStream` instance,
+it will log at `WARN` level that it has not been closed,
+listing the file URL, and the thread name + ID of the the thread
+which creating the file.
+The the stack trace of the `open()` call will be logged at `INFO`
+
+```
+2024-11-13 12:48:24,537 [Finalizer] WARN  resource.leaks (LeakReporter.java:close(114)) - Stream not closed while reading s3a://bucket/test/testFinalizer; thread: JUnit-testFinalizer; id: 11
+2024-11-13 12:48:24,537 [Finalizer] INFO  resource.leaks (LeakReporter.java:close(120)) - stack
+java.io.IOException: Stream not closed while reading s3a://bucket/test/testFinalizer; thread: JUnit-testFinalizer; id: 11
+    at org.apache.hadoop.fs.impl.LeakReporter.<init>(LeakReporter.java:101)
+    at org.apache.hadoop.fs.s3a.S3AInputStream.<init>(S3AInputStream.java:257)
+    at org.apache.hadoop.fs.s3a.S3AFileSystem.executeOpen(S3AFileSystem.java:1891)
+    at org.apache.hadoop.fs.s3a.S3AFileSystem.open(S3AFileSystem.java:1841)
+    at org.apache.hadoop.fs.FileSystem.open(FileSystem.java:997)
+    at org.apache.hadoop.fs.s3a.ITestS3AInputStreamLeakage.testFinalizer(ITestS3AInputStreamLeakage.java:99)
+```
+
+It will also `abort()` the HTTP connection, freeing up space in the connection pool.
+This automated cleanup is _not_ a substitute for applications correctly closing
+input streams -it only happens during garbage collection, and this may not be
+rapid enough to prevent an application running out of connections.
+
+It is possible to stop these warning messages from being logged,
+by restricting the log `org.apache.hadoop.fs.resource.leaks` to
+only log at `ERROR` or above.
+This will also disable error logging for _all other resources whose leaks
+are detected.
+
+```properties
+log4j.logger.org.apache.hadoop.fs.s3a.connection.leaks=ERROR
+```
+
+To disable stack traces without the URI/thread information, set the log level to `WARN`
+
+```properties
+log4j.logger.org.apache.hadoop.fs.s3a.connection.leaks=WARN
+```
+
+This is better for production deployments: leakages are reported but
+stack traces only of relevance to the application developers are
+omitted.
+
+Finally, note that the filesystem and thread context IOStatistic `stream_leaks"` is updated;
+if these statistics are collected then the existence of leakages can be detected.
 
 ### <a name="inconsistent-config"></a> Inconsistent configuration across a cluster
 

@@ -24,6 +24,7 @@ import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.retry.RetryUtils;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
@@ -37,6 +38,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.PathIOException;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.s3a.impl.S3AEncryption;
 import org.apache.hadoop.util.functional.RemoteIterators;
 import org.apache.hadoop.fs.s3a.auth.delegation.EncryptionSecrets;
 import org.apache.hadoop.fs.s3a.impl.MultiObjectDeleteException;
@@ -66,6 +68,7 @@ import java.nio.file.AccessDeniedException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,6 +80,7 @@ import static org.apache.hadoop.fs.s3a.AWSCredentialProviderList.maybeTranslateC
 import static org.apache.hadoop.fs.s3a.Constants.*;
 import static org.apache.hadoop.fs.s3a.audit.AuditIntegration.maybeTranslateAuditException;
 import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.isUnknownBucket;
+import static org.apache.hadoop.fs.s3a.impl.ErrorTranslation.maybeProcessEncryptionClientException;
 import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.instantiationException;
 import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.isAbstract;
 import static org.apache.hadoop.fs.s3a.impl.InstantiationIOException.isNotInstanceOf;
@@ -180,6 +184,8 @@ public final class S3AUtils {
       // exceptions constructed.
       path = "/";
     }
+
+    exception = maybeProcessEncryptionClientException(exception);
 
     if (!(exception instanceof AwsServiceException)) {
       // exceptions raised client-side: connectivity, auth, network problems...
@@ -296,7 +302,7 @@ public final class S3AUtils {
       case SC_405_METHOD_NOT_ALLOWED:
       case SC_415_UNSUPPORTED_MEDIA_TYPE:
       case SC_501_NOT_IMPLEMENTED:
-        ioe = new AWSUnsupportedFeatureException(message, s3Exception);
+        ioe = new AWSUnsupportedFeatureException(message, ase);
         break;
 
       // precondition failure: the object is there, but the precondition
@@ -526,7 +532,7 @@ public final class S3AUtils {
    * @param owner owner of the file
    * @param eTag S3 object eTag or null if unavailable
    * @param versionId S3 object versionId or null if unavailable
-   * @param isCSEEnabled is client side encryption enabled?
+   * @param size s3 object size
    * @return a status entry
    */
   public static S3AFileStatus createFileStatus(Path keyPath,
@@ -535,12 +541,7 @@ public final class S3AUtils {
       String owner,
       String eTag,
       String versionId,
-      boolean isCSEEnabled) {
-    long size = s3Object.size();
-    // check if cse is enabled; strip out constant padding length.
-    if (isCSEEnabled && size >= CSE_PADDING_LENGTH) {
-      size -= CSE_PADDING_LENGTH;
-    }
+      long size) {
     return createFileStatus(keyPath,
         objectRepresentsDirectory(s3Object.key()),
         size, Date.from(s3Object.lastModified()), blockSize, owner, eTag, versionId);
@@ -723,7 +724,6 @@ public final class S3AUtils {
    */
   public static S3xLoginHelper.Login getAWSAccessKeys(URI name,
       Configuration conf) throws IOException {
-    S3xLoginHelper.rejectSecretsInURIs(name);
     Configuration c = ProviderUtils.excludeIncompatibleCredentialProviders(
         conf, S3AFileSystem.class);
     String bucket = name != null ? name.getHost() : "";
@@ -1176,6 +1176,19 @@ public final class S3AUtils {
   }
 
   /**
+   * Get the length of the PUT, verifying that the length is known.
+   * @param putObjectRequest a request bound to a file or a stream.
+   * @return the request length
+   * @throws IllegalArgumentException if the length is negative
+   */
+  public static long getPutRequestLength(PutObjectRequest putObjectRequest) {
+    long len = putObjectRequest.contentLength();
+
+    Preconditions.checkState(len >= 0, "Cannot PUT object of unknown length");
+    return len;
+  }
+
+  /**
    * An interface for use in lambda-expressions working with
    * directory tree listings.
    */
@@ -1311,7 +1324,7 @@ public final class S3AUtils {
    * @throws IOException on any IO problem
    * @throws IllegalArgumentException bad arguments
    */
-  private static String lookupBucketSecret(
+  public static String lookupBucketSecret(
       String bucket,
       Configuration conf,
       String baseKey)
@@ -1457,6 +1470,8 @@ public final class S3AUtils {
     int encryptionKeyLen =
         StringUtils.isBlank(encryptionKey) ? 0 : encryptionKey.length();
     String diagnostics = passwordDiagnostics(encryptionKey, "key");
+    String encryptionContext = S3AEncryption.getS3EncryptionContextBase64Encoded(bucket, conf,
+        encryptionMethod.requiresSecret());
     switch (encryptionMethod) {
     case SSE_C:
       LOG.debug("Using SSE-C with {}", diagnostics);
@@ -1492,7 +1507,7 @@ public final class S3AUtils {
       LOG.debug("Data is unencrypted");
       break;
     }
-    return new EncryptionSecrets(encryptionMethod, encryptionKey);
+    return new EncryptionSecrets(encryptionMethod, encryptionKey, encryptionContext);
   }
 
   /**
@@ -1668,6 +1683,64 @@ public final class S3AUtils {
    */
   public static String formatRange(long rangeStart, long rangeEnd) {
     return String.format("bytes=%d-%d", rangeStart, rangeEnd);
+  }
+
+  /**
+   * Get the equal op (=) delimited key-value pairs of the <code>name</code> property as
+   * a collection of pair of <code>String</code>s, trimmed of the leading and trailing whitespace
+   * after delimiting the <code>name</code> by comma and new line separator.
+   * If no such property is specified then empty <code>Map</code> is returned.
+   *
+   * @param configuration the configuration object.
+   * @param name property name.
+   * @return property value as a <code>Map</code> of <code>String</code>s, or empty
+   * <code>Map</code>.
+   */
+  public static Map<String, String> getTrimmedStringCollectionSplitByEquals(
+      final Configuration configuration,
+      final String name) {
+    String valueString = configuration.get(name);
+    return getTrimmedStringCollectionSplitByEquals(valueString);
+  }
+
+  /**
+   * Get the equal op (=) delimited key-value pairs of the <code>name</code> property as
+   * a collection of pair of <code>String</code>s, trimmed of the leading and trailing whitespace
+   * after delimiting the <code>name</code> by comma and new line separator.
+   * If no such property is specified then empty <code>Map</code> is returned.
+   *
+   * @param valueString the string containing the key-value pairs.
+   * @return property value as a <code>Map</code> of <code>String</code>s, or empty
+   * <code>Map</code>.
+   */
+  public static Map<String, String> getTrimmedStringCollectionSplitByEquals(
+      final String valueString) {
+    if (null == valueString) {
+      return new HashMap<>();
+    }
+    return org.apache.hadoop.util.StringUtils
+        .getTrimmedStringCollectionSplitByEquals(valueString);
+  }
+
+
+  /**
+   * If classloader isolation is {@code true}
+   * (through {@link Constants#AWS_S3_CLASSLOADER_ISOLATION}) or not
+   * explicitly set, then the classLoader of the input configuration object
+   * will be set to the input classloader, otherwise nothing will happen.
+   * @param conf configuration object.
+   * @param classLoader isolated classLoader.
+   */
+  static void maybeIsolateClassloader(Configuration conf, ClassLoader classLoader) {
+    if (conf.getBoolean(Constants.AWS_S3_CLASSLOADER_ISOLATION,
+            Constants.DEFAULT_AWS_S3_CLASSLOADER_ISOLATION)) {
+      LOG.debug("Configuration classloader set to S3AFileSystem classloader: {}", classLoader);
+      conf.setClassLoader(classLoader);
+    } else {
+      LOG.debug("Configuration classloader not changed, support classes needed will be loaded " +
+                      "from the classloader that instantiated the Configuration object: {}",
+              conf.getClassLoader());
+    }
   }
 
 }
