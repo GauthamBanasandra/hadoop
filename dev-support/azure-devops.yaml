@@ -177,10 +177,10 @@ stages:
           testRunTitle: 'Windows 10 Tests'
           failTaskOnFailedTests: false
 
-    - task: PublishHtmlReport@1
-      displayName: 'Publish Yetus HTML Report'
-      condition: always()
-      inputs:
-          reportDir: '$(PATCHDIR)'
-          tabName: 'Yetus Report'
-          reportHtml: 'report.html'
+    # - task: PublishHtmlReport@1
+    #   displayName: 'Publish Yetus HTML Report'
+    #   condition: always()
+    #   inputs:
+    #       reportDir: '$(PATCHDIR)'
+    #       tabName: 'Yetus Report'
+    #       reportHtml: 'report.html'
