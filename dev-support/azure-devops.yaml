@@ -40,7 +40,7 @@ resources:
         - repository: yetus
           type: github
           name: apache/yetus
-          ref: $(YETUS_VERSION)
+          # ref: $(YETUS_VERSION)
           endpoint: GauthamBanasandra
 
 stages:
