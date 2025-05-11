@@ -41,7 +41,7 @@ resources:
           type: github
           name: apache/yetus
           ref: $(YETUS_VERSION)
-          endpoint: github
+          endpoint: GitHubConnection
 
 stages:
 - stage: Windows10Build
