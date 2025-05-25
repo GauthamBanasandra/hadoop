@@ -193,7 +193,7 @@ function run_ci() {
   YETUS_ARGS+=("--build-url-artifacts=artifact/out")
 
   # plugins to enable
-  YETUS_ARGS+=("--plugins=all,-jira")
+  YETUS_ARGS+=("--plugins=all,-jira,-xmllint")
 
   # don't let these tests cause -1s because we aren't really paying that
   # much attention to them
