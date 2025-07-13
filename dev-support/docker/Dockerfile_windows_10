@@ -97,10 +97,10 @@ RUN powershell zstd -d $Env:TEMP\rsync-3.2.7-2-x86_64.pkg.tar.zst -o $Env:TEMP\r
 RUN powershell mkdir "C:\RSync"
 RUN powershell tar -xvf $Env:TEMP\rsync-3.2.7-2-x86_64.pkg.tar -C "C:\RSync"
 # Copy the dependencies of rsync 3.2.7.
-RUN powershell Copy-Item -Path "C:\LibOpenSSL\usr\bin\*.dll" -Destination "C:\Program` Files\Git\usr\bin"
-RUN powershell Copy-Item -Path "C:\LibXXHash\usr\bin\*.dll" -Destination "C:\Program` Files\Git\usr\bin"
-RUN powershell Copy-Item -Path "C:\LibZStd\usr\bin\*.dll" -Destination "C:\Program` Files\Git\usr\bin"
-RUN powershell Copy-Item -Path "C:\RSync\usr\bin\*" -Destination "C:\Program` Files\Git\usr\bin"
+RUN powershell Copy-Item -Path "C:\LibOpenSSL\usr\bin\*.dll" -Destination "C:\Git\usr\bin"
+RUN powershell Copy-Item -Path "C:\LibXXHash\usr\bin\*.dll" -Destination "C:\Git\usr\bin"
+RUN powershell Copy-Item -Path "C:\LibZStd\usr\bin\*.dll" -Destination "C:\Git\usr\bin"
+RUN powershell Copy-Item -Path "C:\RSync\usr\bin\*" -Destination "C:\Git\usr\bin"
 
 COPY pkg-resolver pkg-resolver
 
