@@ -42,7 +42,7 @@ ENV chocolateyVersion=1.4.0
 RUN powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))"
 
 # Install git directly to C:\Git using Chocolatey
-RUN choco install git.install -y --params "/DIR:C:\Git"
+RUN choco install git -y --install-arguments="'/DIR=C:\Git'"
 
 # Install vcpkg.
 # hadolint ignore=DL3003
