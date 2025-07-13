@@ -144,7 +144,7 @@ RUN setx PATH "%PATH%;%JAVA_HOME%\bin"
 RUN setx PATH "%PATH%;C:\Maven\apache-maven-3.8.8\bin"
 RUN setx PATH "%PATH%;C:\CMake\cmake-3.19.0-win64-x64\bin"
 RUN setx PATH "%PATH%;C:\ZStd"
-RUN setx PATH "%PATH%;C:\Program Files\Git\usr\bin"
+RUN setx PATH "%PATH%;C:\Git\bin;C:\Git\cmd;C:\Git\usr\bin"
 RUN setx PATH "%PATH%;C:\Python"
 
 # The mvnsite module runs a bash script and somewhere down in the invocation, it resorts to call
@@ -157,6 +157,9 @@ RUN setx classpath ""
 # Setting Git configurations.
 RUN git config --global core.autocrlf true
 RUN git config --global core.longpaths true
+
+# Uninstall Git installed from Program Files via Chocolatey
+RUN choco uninstall -y git
 
 # Define the entry point for the docker container.
 ENTRYPOINT ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat", "&&", "cmd.exe"]
