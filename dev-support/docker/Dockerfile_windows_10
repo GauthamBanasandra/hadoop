@@ -159,7 +159,7 @@ RUN git config --global core.autocrlf true
 RUN git config --global core.longpaths true
 
 # Uninstall Git installed from Program Files via Chocolatey
-RUN choco uninstall git.install
+RUN choco uninstall git.install -y
 
 # Define the entry point for the docker container.
 ENTRYPOINT ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat", "&&", "cmd.exe"]
