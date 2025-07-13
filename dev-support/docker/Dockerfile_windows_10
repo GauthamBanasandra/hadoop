@@ -41,9 +41,8 @@ RUN curl -SL --output vs_buildtools.exe https://aka.ms/vs/16/release/vs_buildtoo
 ENV chocolateyVersion=1.4.0
 RUN powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))"
 
-# Install git.
-RUN choco install git.install -y
-RUN powershell Copy-Item -Recurse -Path 'C:\Program Files\Git' -Destination C:\Git
+# Install git directly to C:\Git using Chocolatey
+RUN choco install git.install -y --params "/DIR:C:\Git"
 
 # Install vcpkg.
 # hadolint ignore=DL3003
@@ -157,9 +156,6 @@ RUN setx classpath ""
 # Setting Git configurations.
 RUN git config --global core.autocrlf true
 RUN git config --global core.longpaths true
-
-# Uninstall Git installed from Program Files via Chocolatey
-RUN choco uninstall git.install -y
 
 # Define the entry point for the docker container.
 ENTRYPOINT ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat", "&&", "cmd.exe"]
