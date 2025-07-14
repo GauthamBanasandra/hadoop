@@ -67,7 +67,7 @@ param (
     # The path to the Maven repository
     [Parameter(Mandatory = $False)]
     [string]
-    $MavenRepoPath = "$Env:USERPROFILE\.m2",
+    $MavenRepoPath = 'D:\maven\repository',
 
     # Use Docker for the build
     [Parameter(Mandatory = $False)]
