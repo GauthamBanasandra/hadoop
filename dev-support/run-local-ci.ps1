@@ -145,7 +145,7 @@ if ($UseDocker) {
     docker run --rm -v $Workspace\out:C:\out `
         -v $Workspace\hadoop:C:\src `
         -v $Workspace\yetus:C:\yetus `
-        -v $MavenRepoPath`:$Env:USERPROFILE\.m2 `
+        -v $MavenRepoPath`:C:\Users\HadoopBuilder\.m2 `
         -e WORKSPACE=/c -e YETUS=$Env:YETUS `
         -e GIT_COMMIT=HEAD `
         -e GIT_BRANCH=$HadoopRepoBranch `
@@ -154,7 +154,7 @@ if ($UseDocker) {
         -e BASH_EXECUTABLE=/c/Git/bin/bash.exe `
         -e VCPKG_INSTALLED_PACKAGES=/c/vcpkg/installed/x64-windows `
         -e CMAKE_TOOLCHAIN_FILE=/c/vcpkg/scripts/buildsystems/vcpkg.cmake `
-        hadoop-windows-10-builder '/c' 'xcopy' '/s' '/e' '/h' '/y' '/i' '/q' 'C:\src' 'C:\hadoop' '&&' 'C:\Git\bin\bash.exe' '-c' '"echo hello"' # '"/c/src/dev-support/jenkins.sh" "run_ci"'
+        hadoop-windows-10-builder '/c' 'xcopy' '/s' '/e' '/h' '/y' '/i' '/q' 'C:\src' 'C:\hadoop' '&&' 'C:\Git\bin\bash.exe' '-c' './launch-ci-no-params.sh'
 }
 else {
     $Env:BASH_EXECUTABLE = $BashExePath
