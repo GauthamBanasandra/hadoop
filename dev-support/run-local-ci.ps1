@@ -154,6 +154,7 @@ if ($UseDocker) {
         -e BASH_EXECUTABLE=/c/Git/bin/bash.exe `
         -e VCPKG_INSTALLED_PACKAGES=/c/vcpkg/installed/x64-windows `
         -e CMAKE_TOOLCHAIN_FILE=/c/vcpkg/scripts/buildsystems/vcpkg.cmake `
+        --dns=8.8.8.8 `
         hadoop-windows-10-builder '/c' 'xcopy' '/s' '/e' '/h' '/y' '/i' '/q' 'C:\src' 'C:\hadoop' '&&' 'C:\Git\bin\bash.exe' '-c' './launch-ci-no-params.sh'
 }
 else {
