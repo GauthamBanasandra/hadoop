@@ -142,7 +142,9 @@ if ($UseDocker) {
     Write-Host "  Env:IS_WINDOWS: $($Env:IS_WINDOWS)"
     Write-Host "  Env:USERPROFILE: $($Env:USERPROFILE)"
 
-    docker run --rm -v $Workspace\out:C:\out `
+    docker run --rm `
+        --storage-opt "size=120GB" `
+        -v $Workspace\out:C:\out `
         -v $Workspace\hadoop:C:\src `
         -v $Workspace\yetus:C:\yetus `
         -v $MavenRepoPath`:C:\Users\HadoopBuilder\.m2 `
