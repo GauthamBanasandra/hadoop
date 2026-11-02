@@ -17,7 +17,10 @@
 # Dockerfile for installing the necessary dependencies for building Hadoop.
 # See BUILDING.txt.
 
-FROM mcr.microsoft.com/windows/servercore:ltsc2019
+# SPIKE: the base image is a build argument so that GitHub Actions can build on
+# ltsc2022 (windows-2022 runners). The default stays ltsc2019 for Jenkins.
+ARG WINDOWS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2019
+FROM ${WINDOWS_BASE_IMAGE}
 
 # Need to disable the progress bar for speeding up the downloads.
 # hadolint ignore=SC2086
@@ -37,6 +40,19 @@ RUN curl -SL --output vs_buildtools.exe https://aka.ms/vs/16/release/vs_buildtoo
     || IF "%ERRORLEVEL%"=="3010" EXIT 0) \
     && del /q vs_buildtools.exe
 
+# SPIKE: the %ERRORLEVEL% check above is expanded before the installer runs, so
+# a failed install can pass silently. Fail here instead, with the tail of the
+# installer logs.
+RUN if not exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" ( \
+        echo VS Build Tools: vcvars64.bat is missing \
+        & powershell -NoProfile -Command "Get-ChildItem $env:TEMP -Filter dd_*.log | Sort-Object LastWriteTime | Select-Object -Last 4 | ForEach-Object { '== ' + $_.Name; Get-Content $_.FullName -Tail 100 }" \
+        & exit 1)
+RUN if not exist "%ProgramFiles(x86)%\Windows Kits\10\Include\10.0.19041.0" ( \
+        echo VS Build Tools: Windows SDK 10.0.19041 is missing \
+        & powershell -NoProfile -Command "Get-ChildItem $env:TEMP -Filter dd_*.log | Sort-Object LastWriteTime | Select-Object -Last 4 | ForEach-Object { '== ' + $_.Name; Get-Content $_.FullName -Tail 100 }" \
+        & exit 1)
+RUN call "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && where cl.exe
+
 # Install Chocolatey.
 ENV chocolateyVersion=1.4.0
 RUN powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))"
@@ -55,7 +71,19 @@ RUN powershell git clone https://github.com/microsoft/vcpkg.git \
 
 ADD vcpkg/vcpkg.json .
 
-RUN powershell .\vcpkg\vcpkg.exe install --x-install-root .\vcpkg\installed
+# SPIKE: VCPKG_SLIM=1 drops the build trees, downloads and binary cache in the
+# same layer, so the spike can compare layer sizes with and without them.
+ARG VCPKG_SLIM=0
+RUN if "%VCPKG_SLIM%"=="1" ( \
+        set "VCPKG_BINARY_SOURCES=clear" \
+        && C:\vcpkg\vcpkg.exe install --x-install-root C:\vcpkg\installed --clean-after-build \
+        && (if exist C:\vcpkg\buildtrees rmdir /s /q C:\vcpkg\buildtrees) \
+        && (if exist C:\vcpkg\downloads rmdir /s /q C:\vcpkg\downloads) \
+        && (if exist C:\vcpkg\packages rmdir /s /q C:\vcpkg\packages) \
+        && powershell -NoProfile -Command "foreach ($d in 'buildtrees', 'downloads', 'packages') { $p = Join-Path C:\vcpkg $d; if (Test-Path $p) { $mb = [math]::Round((Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1MB); Write-Host ('WARNING: C:\vcpkg\' + $d + ' survived rmdir with ' + $mb + ' MB') } }" \
+    ) else ( \
+        powershell .\vcpkg\vcpkg.exe install --x-install-root .\vcpkg\installed \
+    )
 
 # Install Microsoft Build of OpenJDK 17.
 # Every artifact downloaded below is pinned by SHA-512. Where the publisher
