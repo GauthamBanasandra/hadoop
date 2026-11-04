@@ -37,26 +37,30 @@
 
 SETLOCAL EnableExtensions DisableDelayedExpansion
 
-SET "SRC=C:\src"
-SET "WORK=C:\h"
-SET "OUT=C:\out"
-SET "RC=0"
-SET "VCVARS=%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+@REM The prefix keeps these out of the build tools: CMake takes RC from the
+@REM environment as the resource compiler, and MSBuild turns every
+@REM environment variable into a property.
+
+SET "WIN_CI_SRC=C:\src"
+SET "WIN_CI_WORK=C:\h"
+SET "WIN_CI_OUT=C:\out"
+SET "WIN_CI_RC=0"
+SET "WIN_CI_VCVARS=%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 CALL :log Checking the environment
 @REM The image's entry point already runs vcvars64.bat; repeating it would
 @REM grow PATH past the command line limit.
-IF NOT DEFINED VCINSTALLDIR CALL "%VCVARS%"
-> "%OUT%\path.txt" ECHO %PATH%
+IF NOT DEFINED VCINSTALLDIR CALL "%WIN_CI_VCVARS%"
+> "%WIN_CI_OUT%\path.txt" ECHO %PATH%
 IF /I NOT "%Platform%"=="x64" (
   ECHO ERROR: Platform is "%Platform%" instead of x64.
-  SET "RC=90"
+  SET "WIN_CI_RC=90"
   GOTO :end
 )
 FOR %%T IN (msbuild cmake ctest java mvn bash) DO (
   WHERE %%T >NUL 2>&1 || (
     ECHO ERROR: %%T is not on PATH.
-    SET "RC=91"
+    SET "WIN_CI_RC=91"
     GOTO :end
   )
 )
@@ -64,15 +68,15 @@ CALL java -version
 CALL mvn --version
 CALL cmake --version
 
-CALL :log Copying %SRC% to %WORK%
-robocopy "%SRC%" "%WORK%" /E /MT:8 /R:1 /W:1 /NFL /NDL /NP /NJH
+CALL :log Copying %WIN_CI_SRC% to %WIN_CI_WORK%
+robocopy "%WIN_CI_SRC%" "%WIN_CI_WORK%" /E /MT:8 /R:1 /W:1 /NFL /NDL /NP /NJH
 @REM robocopy exit codes below 8 mean success.
 IF ERRORLEVEL 8 (
   ECHO ERROR: robocopy failed.
-  SET "RC=92"
+  SET "WIN_CI_RC=92"
   GOTO :end
 )
-CD /D "%WORK%" || (SET "RC=93" & GOTO :end)
+CD /D "%WIN_CI_WORK%" || (SET "WIN_CI_RC=93" & GOTO :end)
 
 @REM Not MAVEN_ARGS: Maven 3.9 reads that variable itself, so the arguments
 @REM would be passed twice.
@@ -81,7 +85,7 @@ SET "HADOOP_MVN_ARGS=--batch-mode --no-transfer-progress -Pnative-win -Duse.plat
 CALL :log Building Hadoop
 CALL mvn %HADOOP_MVN_ARGS% clean install -DskipTests -Pdist,yarn-ui -Dmaven.javadoc.skip=true
 IF ERRORLEVEL 1 (
-  SET "RC=10"
+  SET "WIN_CI_RC=10"
   GOTO :end
 )
 CALL :collect
@@ -90,40 +94,40 @@ CALL :collect
 @REM off so that a bats driver failure is not reported as a smoke failure.
 CALL :log Phase 1: TestHdfsNativeCodeLoader
 CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-hdfs-project/hadoop-hdfs -Dtest=TestHdfsNativeCodeLoader -Dsurefire.failIfNoSpecifiedTests=true
-IF ERRORLEVEL 1 SET "RC=20"
+IF ERRORLEVEL 1 SET "WIN_CI_RC=20"
 CALL :collect
 
 IF "%WIN_CI_PHASE1B%"=="1" CALL :phase1b
 
 :end
 CALL :collect
-CALL :log Done, exit code %RC%
-EXIT /B %RC%
+CALL :log Done, exit code %WIN_CI_RC%
+EXIT /B %WIN_CI_RC%
 
 @REM One Maven run per module, so a failure in one module cannot skip the
 @REM others.
 :phase1b
 CALL :log Phase 1b: hadoop-common
 CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-common-project/hadoop-common -Dtest=TestWinUtils,TestNativeIO,TestNativeCrc32,TestShell,TestFileUtil,TestLocalFileSystem,TestPath,TestPathData,TestFsShellCopy,TestSymlinkLocalFSFileSystem -Dsurefire.failIfNoSpecifiedTests=false
-> "%OUT%\phase1b-hadoop-common-rc.txt" ECHO %ERRORLEVEL%
+> "%WIN_CI_OUT%\phase1b-hadoop-common-rc.txt" ECHO %ERRORLEVEL%
 CALL :log Phase 1b: hadoop-hdfs
 CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-hdfs-project/hadoop-hdfs -Dtest=TestAtomicFileOutputStream -Dsurefire.failIfNoSpecifiedTests=false
-> "%OUT%\phase1b-hadoop-hdfs-rc.txt" ECHO %ERRORLEVEL%
+> "%WIN_CI_OUT%\phase1b-hadoop-hdfs-rc.txt" ECHO %ERRORLEVEL%
 CALL :log Phase 1b: hadoop-yarn-common
 CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-yarn-project/hadoop-yarn/hadoop-yarn-common -Dtest=TestWindowsBasedProcessTree -Dsurefire.failIfNoSpecifiedTests=false
-> "%OUT%\phase1b-hadoop-yarn-common-rc.txt" ECHO %ERRORLEVEL%
+> "%WIN_CI_OUT%\phase1b-hadoop-yarn-common-rc.txt" ECHO %ERRORLEVEL%
 EXIT /B 0
 
 :collect
-IF NOT EXIST "%WORK%" EXIT /B 0
+IF NOT EXIST "%WIN_CI_WORK%" EXIT /B 0
 CALL :log Collecting outputs
-robocopy "%WORK%" "%OUT%\bin" winutils.exe hadoop.dll hdfs.dll /S /XD .git node_modules /R:0 /W:0 /NFL /NDL /NP /NJH >> "%OUT%\collect.log"
+robocopy "%WIN_CI_WORK%" "%WIN_CI_OUT%\bin" winutils.exe hadoop.dll hdfs.dll /S /XD .git node_modules /R:0 /W:0 /NFL /NDL /NP /NJH >> "%WIN_CI_OUT%\collect.log"
 CALL :log robocopy of the binaries exited with %ERRORLEVEL%
-robocopy "%WORK%" "%OUT%\reports" TEST-*.xml *-output.txt *.dumpstream hs_err*.log CMakeError.log CMakeOutput.log CMakeConfigureLog.yaml /S /XD .git node_modules /R:0 /W:0 /NFL /NDL /NP /NJH >> "%OUT%\collect.log"
+robocopy "%WIN_CI_WORK%" "%WIN_CI_OUT%\reports" TEST-*.xml *-output.txt *.dumpstream hs_err*.log CMakeError.log CMakeOutput.log CMakeConfigureLog.yaml /S /XD .git node_modules /R:0 /W:0 /NFL /NDL /NP /NJH >> "%WIN_CI_OUT%\collect.log"
 CALL :log robocopy of the reports exited with %ERRORLEVEL%
 EXIT /B 0
 
 :log
 ECHO [%DATE% %TIME%] %*
->> "%OUT%\timeline.txt" ECHO [%DATE% %TIME%] %*
+>> "%WIN_CI_OUT%\timeline.txt" ECHO [%DATE% %TIME%] %*
 EXIT /B 0

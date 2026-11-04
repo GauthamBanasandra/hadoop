@@ -435,11 +435,12 @@ jobs:
             variant: baseline
             data_root: C
             phase1b: false
-          - name: "S3 windows-2025 slim, Docker on C:"
-            key: w2025-slim-c
+          # C: has about 28 GB free here, so Docker goes on D:.
+          - name: "S3 windows-2025 slim, Docker on D:"
+            key: w2025-slim-d
             os: windows-2025
             variant: slim
-            data_root: C
+            data_root: D
             phase1b: false
     env:
       VARIANT: ${{ matrix.variant }}
@@ -572,15 +573,22 @@ jobs:
 
       # Data for S3: does the Hyper-V fallback work here and with how many CPUs,
       # and does process isolation accept a base newer than the host?
+      # No argument may contain a space: the entry point runs under cmd /c,
+      # which strips the outer quotes once the line holds more than two.
       - name: Probe Hyper-V and a newer base revision
         continue-on-error: true
         run: |
           $ErrorActionPreference = 'Continue'
-          $hv = docker run --rm --isolation=hyperv --cpu-count 4 $env:IMAGE /c "echo CPUS=%NUMBER_OF_PROCESSORS% & exit 3" 2>&1 | Out-String
-          $hvRc = $LASTEXITCODE
-          Write-Host $hv
-          $cpus = if ($hv -match 'CPUS=(\d+)') { $Matches[1] } else { 'unknown' }
-          "HYPERV_PROBE=rc $hvRc, $cpus CPUs" >> $env:GITHUB_ENV
+          $hv = @()
+          foreach ($cpuArgs in @(), @('--cpu-count', '4')) {
+            $o = docker run --rm --isolation=hyperv @cpuArgs $env:IMAGE /c set NUMBER_OF_PROCESSORS 2>&1 | Out-String
+            $rc = $LASTEXITCODE
+            Write-Host $o
+            $cpus = if ($o -match 'NUMBER_OF_PROCESSORS=(\d+)') { $Matches[1] } else { 'unknown' }
+            $label = if ($cpuArgs) { 'cpu-count 4' } else { 'default' }
+            $hv += "$label rc $rc $cpus CPUs"
+          }
+          "HYPERV_PROBE=$($hv -join '; ')" >> $env:GITHUB_ENV
           $probe = 'mcr.microsoft.com/windows/nanoserver:ltsc2022'
           docker pull $probe | Out-Null
           $probeOs = docker image inspect $probe --format '{{.OsVersion}}'
