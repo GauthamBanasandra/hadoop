@@ -197,6 +197,10 @@ RUN powershell "(Get-Content C:\secpol.cfg).Replace('SeCreateSymbolicLinkPrivile
 RUN powershell secedit /configure /db "C:\windows\security\local.sdb" /cfg "C:\secpol.cfg"
 RUN powershell Remove-Item -Force "C:\secpol.cfg" -Confirm:$false
 
+# Tests that use file:///tmp resolve it to C:\tmp, so create it writable by
+# every user, like /tmp on Linux. S-1-5-32-545 is the Users group.
+RUN mkdir C:\tmp && icacls C:\tmp /grant "*S-1-5-32-545:(OI)(CI)M"
+
 # Login as HadoopBuilder and set the necessary environment and PATH variables.
 USER HadoopBuilder
 ENV PROTOBUF_HOME "C:\vcpkg\installed\x64-windows"

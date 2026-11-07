@@ -23,7 +23,8 @@
 # With neither, it only starts the engine if it is not running.
 # The windowsfilter sandbox already defaults to 127 GB, so it is left alone.
 # Writes DOCKER_ROOT_DIR, DOCKER_INITIAL_STATUS and DOCKER_READY_SECONDS to
-# GITHUB_ENV when that is set.
+# GITHUB_ENV when that is set. Later calls in the same job keep the first
+# call's status and timing, and write DOCKER_RESTART_READY_SECONDS instead.
 
 param(
     [string] $DataRoot = '',
@@ -53,7 +54,8 @@ if (-not $service) {
     Write-Host '::error title=infra::The Docker service is not installed on this runner'
     exit 1
 }
-Set-JobEnv 'DOCKER_INITIAL_STATUS' $service.Status
+$firstCall = -not $env:DOCKER_READY_SECONDS
+if ($firstCall) { Set-JobEnv 'DOCKER_INITIAL_STATUS' $service.Status }
 
 # A service that is still starting has already read the old daemon.json, so
 # wait for it to settle before deciding whether to restart it.
@@ -110,7 +112,8 @@ if (-not $ready) {
     Get-Service -Name docker | Format-List | Out-String | Write-Host
     exit 1
 }
-Set-JobEnv 'DOCKER_READY_SECONDS' ([math]::Round($sw.Elapsed.TotalSeconds))
+$readyName = if ($firstCall) { 'DOCKER_READY_SECONDS' } else { 'DOCKER_RESTART_READY_SECONDS' }
+Set-JobEnv $readyName ([math]::Round($sw.Elapsed.TotalSeconds))
 
 $root = (docker info --format '{{.DockerRootDir}}').Trim()
 Set-JobEnv 'DOCKER_ROOT_DIR' $root

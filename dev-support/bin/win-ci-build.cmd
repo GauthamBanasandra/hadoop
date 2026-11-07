@@ -106,9 +106,21 @@ EXIT /B %WIN_CI_RC%
 
 @REM One Maven run per module, so a failure in one module cannot skip the
 @REM others.
+@REM
+@REM hadoop-common excludes the methods that fail on every Windows host,
+@REM including Jenkins:
+@REM   TestFileUtil#testUnZip: FileUtil.unZip calls setPosixFilePermissions,
+@REM     which NTFS does not support (since HADOOP-18145).
+@REM   TestFileUtil#testFailFullyDeleteDirSymlinks and #testSymlinkSameFile:
+@REM     POSIX-only assumptions, unlike their guarded neighbours.
+@REM   TestFileUtil#testGetDU: its tearDown cannot delete a 0000 directory,
+@REM     because winutils chmod -R lists children before fixing the parent.
+@REM   TestNativeIO#testFstat: the S_IF* constants are only set on Unix.
+@REM   TestFsShellCopy#testPutSrcFileNoPerm: HADOOP-19599.
+@REM CALL expands percent signs a second time, so %%%% reaches Maven as %.
 :phase1b
 CALL :log Phase 1b: hadoop-common
-CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-common-project/hadoop-common -Dtest=TestWinUtils,TestNativeIO,TestNativeCrc32,TestShell,TestFileUtil,TestLocalFileSystem,TestPath,TestPathData,TestFsShellCopy,TestSymlinkLocalFSFileSystem -Dsurefire.failIfNoSpecifiedTests=false
+CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-common-project/hadoop-common "-Dtest=TestWinUtils,TestNativeIO,TestNativeCrc32,TestShell,TestFileUtil,TestLocalFileSystem,TestPath,TestPathData,TestFsShellCopy,TestSymlinkLocalFSFileSystem,!%%%%regex[.*TestFileUtil.class#testUnZip|testFailFullyDeleteDirSymlinks|testSymlinkSameFile|testGetDU],!%%%%regex[.*TestNativeIO.class#testFstat],!%%%%regex[.*TestFsShellCopy.class#testPutSrcFileNoPerm]" -Dsurefire.failIfNoSpecifiedTests=false
 > "%WIN_CI_OUT%\phase1b-hadoop-common-rc.txt" ECHO %ERRORLEVEL%
 CALL :log Phase 1b: hadoop-hdfs
 CALL mvn %HADOOP_MVN_ARGS% test -P!shelltest -pl hadoop-hdfs-project/hadoop-hdfs -Dtest=TestAtomicFileOutputStream -Dsurefire.failIfNoSpecifiedTests=false
