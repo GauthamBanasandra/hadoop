@@ -574,8 +574,9 @@ Building on Windows 10
 Requirements:
 
 * Windows 10 or Windows 11. The Docker route below has been verified on a
-  Windows 11 host; since the build itself runs inside a Windows container, the
-  host version matters only for Docker's own requirements.
+  Windows 11 host. Its image is based on Windows Server Core ltsc2022 by default,
+  which needs a Windows 11 or Windows Server 2022 (or newer) host; on Windows 10
+  or Windows Server 2019, build the image from ltsc2019 instead, as shown below.
 * JDK 17
 * Maven 3.9.15 or later (maven.apache.org, optional, a compatible version is automatically downloaded if using mvnw.cmd)
 * Boost 1.86.0 (boost.org)
@@ -616,9 +617,13 @@ We first need to build the Docker image for building Hadoop on Windows 10. Run t
 the root of the Hadoop repository.
 > docker build -t hadoop-windows-10-builder -m 8g -f .\dev-support\docker\Dockerfile_windows_10 .\dev-support\docker\
 
+On a Windows 10 or Windows Server 2019 host, which cannot run ltsc2022 containers, build the image
+from ltsc2019 instead.
+> docker build -t hadoop-windows-10-builder -m 8g --build-arg WINDOWS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2019 -f .\dev-support\docker\Dockerfile_windows_10 .\dev-support\docker\
+
 The -m 8g is needed because the vcpkg step compiles Boost, Protocol Buffers, OpenSSL and Zlib from
 source and the default container memory is too small. Expect the image build to take a few hours
-and the resulting image to be around 23 GB. Note that -m and --isolation are options of the classic
+and the resulting image to be around 16 GB. Note that -m and --isolation are options of the classic
 builder, so DOCKER_BUILDKIT must not be set to 1. If it is set in your
 environment, clear it for the session first -
 > set DOCKER_BUILDKIT=            (cmd.exe)

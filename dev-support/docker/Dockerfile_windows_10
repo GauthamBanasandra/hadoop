@@ -17,7 +17,16 @@
 # Dockerfile for installing the necessary dependencies for building Hadoop.
 # See BUILDING.txt.
 
-FROM mcr.microsoft.com/windows/servercore:ltsc2019
+# The base is pinned by digest, so it changes only when this file does, and
+# every bump gives the image a new content hash. A base older than the host
+# runs under process isolation, but a newer one may fail to start, so bump it
+# only once the CI hosts (GitHub's windows-2022 runners) have the new monthly
+# revision. That wait also serves as the cooldown SECURITY.md asks for.
+# Hosts that cannot run ltsc2022, such as Windows 10 and Windows Server 2019,
+# pass --build-arg WINDOWS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2019
+# The digest below is servercore:ltsc2022 10.0.20348.5761.
+ARG WINDOWS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2022@sha256:593cf4a5ef08cfff00a03637e45eba073b8fe9dc90b80af4449bc5f427c7cdcd
+FROM ${WINDOWS_BASE_IMAGE}
 
 # Need to disable the progress bar for speeding up the downloads.
 # hadolint ignore=SC2086
@@ -37,6 +46,12 @@ RUN curl -SL --output vs_buildtools.exe https://aka.ms/vs/16/release/vs_buildtoo
     || IF "%ERRORLEVEL%"=="3010" EXIT 0) \
     && del /q vs_buildtools.exe
 
+# The %ERRORLEVEL% test above is expanded before the installer runs, so it
+# never sees the installer's exit code. Check the result instead.
+RUN call "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" \
+    && where cl.exe \
+    && if not exist "%ProgramFiles(x86)%\Windows Kits\10\Include\10.0.19041.0" (echo Windows SDK 10.0.19041 is missing & exit 1)
+
 # Install Chocolatey.
 ENV chocolateyVersion=1.4.0
 RUN powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))"
@@ -55,7 +70,14 @@ RUN powershell git clone https://github.com/microsoft/vcpkg.git \
 
 ADD vcpkg/vcpkg.json .
 
-RUN powershell .\vcpkg\vcpkg.exe install --x-install-root .\vcpkg\installed
+# Remove vcpkg's build trees, downloads and packages in the same layer, and
+# turn off its binary cache, which would keep a second copy of every package.
+# This takes about 7 GB off the image.
+RUN set "VCPKG_BINARY_SOURCES=clear" \
+    && C:\vcpkg\vcpkg.exe install --x-install-root C:\vcpkg\installed --clean-after-build \
+    && (if exist C:\vcpkg\buildtrees rmdir /s /q C:\vcpkg\buildtrees) \
+    && (if exist C:\vcpkg\downloads rmdir /s /q C:\vcpkg\downloads) \
+    && (if exist C:\vcpkg\packages rmdir /s /q C:\vcpkg\packages)
 
 # Install Microsoft Build of OpenJDK 17.
 # Every artifact downloaded below is pinned by SHA-512. Where the publisher
@@ -168,6 +190,10 @@ RUN powershell secedit /export /cfg "C:\secpol.cfg"
 RUN powershell "(Get-Content C:\secpol.cfg).Replace('SeCreateSymbolicLinkPrivilege = ', 'SeCreateSymbolicLinkPrivilege = HadoopBuilder,').Replace('PasswordComplexity = 0', 'PasswordComplexity = 1') | Out-File C:\secpol.cfg"
 RUN powershell secedit /configure /db "C:\windows\security\local.sdb" /cfg "C:\secpol.cfg"
 RUN powershell Remove-Item -Force "C:\secpol.cfg" -Confirm:$false
+
+# Tests that use file:///tmp resolve it to C:\tmp, so create it writable by
+# every user, like /tmp on Linux. S-1-5-32-545 is the Users group.
+RUN mkdir C:\tmp && icacls C:\tmp /grant "*S-1-5-32-545:(OI)(CI)M"
 
 # Login as HadoopBuilder and set the necessary environment and PATH variables.
 USER HadoopBuilder
