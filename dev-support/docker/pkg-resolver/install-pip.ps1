@@ -16,6 +16,8 @@
 
 # The code lines below are derived from -
 # https://github.com/docker-library/python/blob/105d6f34e7d70aad6f8c3e249b8208efa591916a/3.11/windows/windowsservercore-ltsc2022/Dockerfile
+# See install-python.ps1 for why this is set here.
+$ErrorActionPreference = 'Stop'
 
 Write-Host ('Downloading get-pip.py ({0}) ...' -f $Env:PYTHON_GET_PIP_URL)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -33,12 +35,22 @@ python get-pip.py `
     --disable-pip-version-check `
     --no-cache-dir `
     --no-compile `
+    --no-wheel `
 ('pip=={0}' -f $Env:PYTHON_PIP_VERSION) `
 ('setuptools=={0}' -f $Env:PYTHON_SETUPTOOLS_VERSION)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'FAILED!'
+    exit 1
+}
 
 Remove-Item get-pip.py -Force
 
 Write-Host 'Verifying pip install ...'
-pip --version
+$pipVersion = pip --version
+Write-Host $pipVersion
+if ($pipVersion -notlike ('pip {0} *' -f $Env:PYTHON_PIP_VERSION)) {
+    Write-Host 'FAILED!'
+    exit 1
+}
 
 Write-Host 'Complete.'

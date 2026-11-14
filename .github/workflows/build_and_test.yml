@@ -32,6 +32,8 @@ on:
   push:
     branches:
       - "**"
+      # SPIKE: spike branches run only spike_windows.yml.
+      - "!spike/**"
   workflow_dispatch:
 
 jobs:

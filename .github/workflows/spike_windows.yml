@@ -1,0 +1,1062 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+# SPIKE ONLY: never to be merged. Runs spikes S1-S3 of the Windows
+# PR-validation plan in a fork:
+#   S1 builds the Windows build image on windows-2022 without the vcpkg build
+#      trees, and measures step times, layer sizes and the push. (Runs 1-2 also
+#      built a baseline variant with them: 8.21 GB compressed against 6.13, so
+#      it was dropped.)
+#   S2 pulls the image on a fresh runner, checks the entry point, isolation and
+#      volume ACLs, and runs the full Maven build plus the native smoke test.
+#   S3 repeats S2 on windows-2025 and under forced Hyper-V isolation now, and
+#      on later reruns of this workflow.
+# Images are tagged with the git tree hash of dev-support/docker plus the
+# pinned base digest, so commits that change only this workflow or
+# win-ci-build.cmd reuse them. Dispatch with force_image_build to measure S1
+# again. Every job writes metrics.json to its artifact for aggregating S3
+# across runs.
+
+name: "Spike: Windows CI"
+
+on:
+  push:
+    branches:
+      - "spike/windows-gha"
+      - "spike/windows-image-d1"
+      - "spike/windows-image-d2"
+  workflow_dispatch:
+    inputs:
+      force_image_build:
+        description: "Rebuild the images even if they exist"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: spike-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  # Pinned, not resolved from the runner: a base newer than the host can fail
+  # to start under process isolation, and windows-2022 hosts trail MCR by one
+  # to two weeks after each Patch Tuesday, with old and new runner images
+  # deployed side by side for days. An older base runs on a newer host, so
+  # bump it to the servercore digest that the oldest deployed win22 runner
+  # image lists as cached.
+  # servercore:10.0.20348.5761, cached in win22 runner image 20261026.347
+  # (20261101.353 caches 5773).
+  # SPIKE (D1 test): this must equal the Dockerfile's ARG default. The image is
+  # built without --build-arg, so that default is what gets tested.
+  WINDOWS_BASE_IMAGE: mcr.microsoft.com/windows/servercore:ltsc2022@sha256:593cf4a5ef08cfff00a03637e45eba073b8fe9dc90b80af4449bc5f427c7cdcd
+
+jobs:
+  image:
+    name: "S1 image (${{ matrix.variant }})"
+    if: github.repository != 'apache/hadoop'
+    runs-on: windows-2022
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [slim]
+    env:
+      VARIANT: ${{ matrix.variant }}
+      FORCE_IMAGE_BUILD: ${{ inputs.force_image_build == true }}
+      DOCKER_BUILDKIT: "0"
+    steps:
+      - name: Record the start time
+        run: |
+          "JOB_START=$([DateTime]::UtcNow.ToString('o'))" >> $env:GITHUB_ENV
+          $logs = Join-Path $env:RUNNER_TEMP 'spike-logs'
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          "LOGS=$logs" >> $env:GITHUB_ENV
+
+      # The image needs only its build context. A full checkout would also need
+      # core.longpaths for the deepest test paths.
+      - name: Check out the Docker build context
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            dev-support/docker
+            .github/spike
+
+      - name: Name the image
+        run: |
+          $context = (git rev-parse HEAD:dev-support/docker).Trim().Substring(0, 12)
+          $default = (Select-String -Path dev-support/docker/Dockerfile_windows_10 -Pattern '^ARG WINDOWS_BASE_IMAGE=(\S+)').Matches[0].Groups[1].Value
+          if ($default -ne $env:WINDOWS_BASE_IMAGE) { Write-Host "::error::The Dockerfile's default base '$default' is not WINDOWS_BASE_IMAGE"; exit 1 }
+          if ($env:WINDOWS_BASE_IMAGE -notmatch '@sha256:(?<d>[0-9a-f]{64})$') { Write-Host '::error::WINDOWS_BASE_IMAGE must be pinned by digest'; exit 1 }
+          $base = $Matches.d.Substring(0, 8)
+          $name = "$($env:GITHUB_REPOSITORY.ToLowerInvariant())/gha-build-windows_10-spike"
+          "IMAGE_NAME=$name" >> $env:GITHUB_ENV
+          "IMAGE=ghcr.io/${name}:$($env:VARIANT)-$context-$base" >> $env:GITHUB_ENV
+          Write-Host "Image ghcr.io/${name}:$($env:VARIANT)-$context-$base"
+
+      - name: Record the host
+        run: |
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $hostOs = "$($cv.CurrentBuild).$($cv.UBR)"
+          "HOST_OS=$hostOs" >> $env:GITHUB_ENV
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Write-Host "OS $($cv.ProductName) build $hostOs, runner image $env:ImageOS $env:ImageVersion, $($cs.NumberOfLogicalProcessors) CPUs, $([math]::Round($cs.TotalPhysicalMemory / 1GB, 1)) GB RAM"
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free / 1GB, 1)}}, @{n='UsedGB';e={[math]::Round($_.Used / 1GB, 1)}} | Out-String | Write-Host
+
+      - name: Start Docker with the default configuration
+        timeout-minutes: 15
+        run: ./.github/spike/win-docker.ps1
+
+      - name: Move Docker to the D drive
+        timeout-minutes: 15
+        run: ./.github/spike/win-docker.ps1 -DataRoot D
+
+      # Reads the base's revision from the registry, so it is known even when
+      # the build is skipped. A base newer than the host may not build here.
+      - name: Check the pinned base against the host
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $raw = docker manifest inspect --verbose $env:WINDOWS_BASE_IMAGE 2>$null | Out-String
+          $baseOs = 'unknown'
+          if ($LASTEXITCODE -eq 0 -and $raw.Trim()) {
+            $m = $raw | ConvertFrom-Json
+            $win = @($m) | Where-Object { $_.Descriptor.platform.os -eq 'windows' } | Select-Object -First 1
+            if ($win.Descriptor.platform.'os.version') { $baseOs = $win.Descriptor.platform.'os.version' }
+          }
+          Write-Host "Base $env:WINDOWS_BASE_IMAGE, OS $baseOs, host $env:HOST_OS"
+          "BASE_OS=$baseOs" >> $env:GITHUB_ENV
+          $b = $baseOs -split '\.'; $h = $env:HOST_OS -split '\.'
+          if ($b.Count -eq 4 -and $b[2] -eq $h[0] -and [int]$b[3] -gt [int]$h[1]) {
+            Write-Host "::warning title=infra::The base revision $($b[3]) is newer than the host's $($h[1])"
+          }
+          exit 0
+
+      # A miss is the normal first-run case, so this step never fails; at worst
+      # an unclear error leads to a rebuild.
+      - name: Check for an existing image
+        id: exists
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:GHCR_TOKEN | docker login ghcr.io --username $env:GITHUB_ACTOR --password-stdin
+          $out = docker manifest inspect $env:IMAGE 2>&1 | Out-String
+          $found = $LASTEXITCODE -eq 0
+          docker logout ghcr.io
+          if ($found -and $env:FORCE_IMAGE_BUILD -ne 'true') {
+            Write-Host "$env:IMAGE already exists; skipping the build"
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            if (-not $found) { Write-Host "Not in the registry yet: $($out.Trim())" }
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+          exit 0
+
+      # Opens and cancels an upload session, so a missing package permission
+      # fails here instead of after a multi-hour build.
+      - name: Check that this job can push
+        if: steps.exists.outputs.skip != 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:GITHUB_ACTOR):$($env:GHCR_TOKEN)"))
+          try {
+            $t = Invoke-WebRequest -Uri "https://ghcr.io/token?service=ghcr.io&scope=repository:$($env:IMAGE_NAME):pull,push" -Headers @{ Authorization = "Basic $basic" } -SkipHttpErrorCheck
+            if ($t.StatusCode -in 401, 403) { Write-Host "::error title=infra::ghcr.io refused a push token (HTTP $($t.StatusCode))"; exit 1 }
+            $token = ($t.Content | ConvertFrom-Json).token
+            Write-Host "::add-mask::$token"
+            $r = Invoke-WebRequest -Method Post -Uri "https://ghcr.io/v2/$($env:IMAGE_NAME)/blobs/uploads/" -Headers @{ Authorization = "Bearer $token" } -SkipHttpErrorCheck
+          } catch {
+            Write-Host "::warning title=infra::The push probe could not run: $_"
+            exit 0
+          }
+          if ($r.StatusCode -in 401, 403) {
+            Write-Host "::error title=infra::GITHUB_TOKEN cannot push to ghcr.io/$($env:IMAGE_NAME) (HTTP $($r.StatusCode))"
+            exit 1
+          }
+          $location = $r.Headers['Location'] | Select-Object -First 1
+          if ($r.StatusCode -eq 202 -and $location) {
+            if ($location -notmatch '^https?://') { $location = "https://ghcr.io$location" }
+            Invoke-WebRequest -Method Delete -Uri $location -Headers @{ Authorization = "Bearer $token" } -SkipHttpErrorCheck | Out-Null
+            Write-Host 'Push probe: ghcr.io accepted an upload session'
+          } else {
+            Write-Host "::warning title=infra::The push probe got HTTP $($r.StatusCode)"
+          }
+          exit 0
+
+      - name: Pull the base image
+        if: steps.exists.outputs.skip != 'true'
+        timeout-minutes: 30
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          docker pull $env:WINDOWS_BASE_IMAGE
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error title=infra::Base image pull failed'; exit 1 }
+          "BASE_PULL_MINUTES=$([math]::Round($sw.Elapsed.TotalMinutes, 1))" >> $env:GITHUB_ENV
+
+      - name: Build the image
+        id: build
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $sampler = Start-ThreadJob -ArgumentList (Join-Path $env:LOGS 'disk.csv') -ScriptBlock {
+            param($path)
+            while ($true) {
+              $now = [DateTime]::UtcNow.ToString('o')
+              Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } |
+                ForEach-Object { '{0},{1},{2}' -f $now, $_.Name, [math]::Round($_.Free / 1GB, 2) } |
+                Add-Content -Path $path
+              Start-Sleep -Seconds 60
+            }
+          }
+          $log = Join-Path $env:LOGS 'docker-build.log'
+          $writer = [IO.StreamWriter]::new($log, $false, [Text.UTF8Encoding]::new($false))
+          $writer.AutoFlush = $true
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          try {
+            docker build `
+              --label "org.opencontainers.image.source=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+              --label "org.opencontainers.image.revision=$env:GITHUB_SHA" `
+              --tag $env:IMAGE `
+              --file dev-support/docker/Dockerfile_windows_10 `
+              dev-support/docker 2>&1 |
+              ForEach-Object {
+                $line = '[{0}] {1}' -f [DateTime]::UtcNow.ToString('o'), $_
+                $writer.WriteLine($line)
+                $line
+              }
+            $rc = $LASTEXITCODE
+          } finally {
+            $writer.Dispose()
+            Stop-Job $sampler
+            Remove-Job $sampler -Force
+          }
+          "BUILD_MINUTES=$([math]::Round($sw.Elapsed.TotalMinutes, 1))" >> $env:GITHUB_ENV
+          "BUILD_RC=$rc" >> $env:GITHUB_ENV
+          if ($rc -ne 0) { Write-Host "::error::docker build failed with exit code $rc"; exit 1 }
+          exit 0
+
+      # Metrics only: a failure here must not hold back the push.
+      - name: Time each Dockerfile step
+        if: always() && steps.build.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          $log = Join-Path $env:LOGS 'docker-build.log'
+          if (-not (Test-Path $log)) { exit 0 }
+          $steps = [Collections.Generic.List[object]]::new()
+          foreach ($line in [IO.File]::ReadLines($log)) {
+            if ($line -match '^\[(?<ts>[^\]]+)\] Step (?<n>\d+)/(?<m>\d+) : (?<cmd>.*)$') {
+              $steps.Add([pscustomobject]@{
+                Step    = [int]$Matches.n
+                Start   = [DateTime]::Parse($Matches.ts, $null, 'RoundtripKind')
+                Command = $Matches.cmd
+                Minutes = 0.0
+              })
+            }
+          }
+          $end = (Get-Item $log).LastWriteTimeUtc
+          for ($i = 0; $i -lt $steps.Count; $i++) {
+            $next = if ($i + 1 -lt $steps.Count) { $steps[$i + 1].Start } else { $end }
+            $steps[$i].Minutes = [math]::Round(($next - $steps[$i].Start).TotalMinutes, 2)
+          }
+          $steps | Export-Csv -NoTypeInformation -Path (Join-Path $env:LOGS 'step-times.csv')
+          $vcpkg = ($steps | Where-Object { $_.Command -match 'vcpkg(\.exe)? install' } | Measure-Object Minutes -Sum).Sum
+          "VCPKG_MINUTES=$([math]::Round([double]$vcpkg, 1))" >> $env:GITHUB_ENV
+          $md = @("### S1 ${env:VARIANT}: slowest Dockerfile steps", '', '| Step | Minutes | Instruction |', '|---|---|---|')
+          foreach ($s in ($steps | Sort-Object Minutes -Descending | Select-Object -First 15)) {
+            $cmd = ($s.Command -replace '\|', '\|') -replace '`', "'"
+            if ($cmd.Length -gt 100) { $cmd = $cmd.Substring(0, 100) + '...' }
+            $md += "| $($s.Step) | $($s.Minutes) | ``$cmd`` |"
+          }
+          $md += ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      # Uncompressed sizes survive a failed push, unlike the registry's.
+      - name: Record image size and history
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          $hist = Join-Path $env:LOGS 'history.tsv'
+          docker history --no-trunc --human=false --format '{{.Size}}\t{{.CreatedBy}}' $env:IMAGE > $hist
+          $bytes = [long](docker image inspect $env:IMAGE --format '{{.Size}}')
+          "IMAGE_GB=$([math]::Round($bytes / 1GB, 2))" >> $env:GITHUB_ENV
+          "IMAGE_LAYERS=$(docker image inspect $env:IMAGE --format '{{len .RootFS.Layers}}')" >> $env:GITHUB_ENV
+          $md = @("### S1 ${env:VARIANT}: largest uncompressed layers", '', '| GB | Created by |', '|---|---|')
+          $rows = Get-Content $hist | ForEach-Object {
+            $size, $by = $_ -split "`t", 2
+            [pscustomobject]@{ GB = [math]::Round([long]$size / 1GB, 2); By = $by }
+          }
+          foreach ($r in ($rows | Sort-Object GB -Descending | Select-Object -First 8)) {
+            $by = ($r.By -replace '\|', '\|') -replace '`', "'"
+            if ($by.Length -gt 100) { $by = $by.Substring(0, 100) + '...' }
+            $md += "| $($r.GB) | ``$by`` |"
+          }
+          $md += ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      # One attempt: the engine already retries each layer up to 5 times, and
+      # the plan's criterion is a first-try push.
+      - name: Push the image
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 60
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:GHCR_TOKEN | docker login ghcr.io --username $env:GITHUB_ACTOR --password-stdin
+          $log = Join-Path $env:LOGS 'docker-push.log'
+          $writer = [IO.StreamWriter]::new($log, $false, [Text.UTF8Encoding]::new($false))
+          $writer.AutoFlush = $true
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          try {
+            docker push $env:IMAGE 2>&1 |
+              ForEach-Object {
+                $line = '[{0}] {1}' -f [DateTime]::UtcNow.ToString('o'), $_
+                $writer.WriteLine($line)
+                $line
+              }
+            $rc = $LASTEXITCODE
+          } finally {
+            $writer.Dispose()
+          }
+          docker logout ghcr.io
+          $retries = @(Select-String -Path $log -Pattern 'Retrying').Count
+          "PUSH_OK=$($rc -eq 0)" >> $env:GITHUB_ENV
+          "PUSH_RETRIES=$retries" >> $env:GITHUB_ENV
+          "PUSH_MINUTES=$([math]::Round($sw.Elapsed.TotalMinutes, 1))" >> $env:GITHUB_ENV
+          if ($rc -ne 0) { Write-Host "::error::docker push failed with exit code $rc"; exit 1 }
+          exit 0
+
+      # SPIKE (D2 test): the tools D2 installs differently, as the build user
+      # through the entry point, after the push so a failure here does not hold
+      # it back. One command per run, without quotes: the entry point's cmd /c
+      # strips quotes from longer command lines.
+      - name: Check the D2 tools in the image
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $required = @(
+            'where git bash rsync python pip mvn cmake java zstd tar',
+            'git --version',
+            'git config --system --list --show-origin',
+            'git config --global --list --show-origin',
+            'rsync --version',
+            'bash --version',
+            'python --version',
+            'pip --version',
+            'pip list',
+            'pip check',
+            'java -version',
+            'mvn --version',
+            'cmake --version',
+            'zstd --version',
+            'dir C:\Windows\System32\msvcr100.dll'
+          )
+          $failed = @()
+          foreach ($c in $required) {
+            Write-Host "::group::$c"
+            docker run --rm $env:IMAGE /c @($c -split ' ')
+            $rc = $LASTEXITCODE
+            Write-Host '::endgroup::'
+            Write-Host "$c -> $rc"
+            if ($rc -ne 0) { $failed += $c }
+          }
+          # Informational: PATH as the build user sees it, and what is left in
+          # C:\, C:\ProgramData and the administrator's TEMP.
+          docker run --rm $env:IMAGE /c set PATH
+          docker run --rm $env:IMAGE /c dir /b C:\ C:\ProgramData
+          docker run --rm --user ContainerAdministrator $env:IMAGE /c dir /b /s %TEMP%
+          if ($failed) { Write-Host "::error::D2 checks failed: $($failed -join '; ')"; exit 1 }
+          exit 0
+
+      # Only for an image this run pushed or reused: after a failed rebuild the
+      # tag still names the previous image.
+      - name: Read compressed layer sizes from the registry
+        if: always() && (steps.exists.outputs.skip == 'true' || env.PUSH_OK == 'True')
+        timeout-minutes: 10
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:GHCR_TOKEN | docker login ghcr.io --username $env:GITHUB_ACTOR --password-stdin
+          $raw = docker manifest inspect --verbose $env:IMAGE 2>$null | Out-String
+          $rc = $LASTEXITCODE
+          docker logout ghcr.io
+          if ($rc -ne 0 -or -not $raw.Trim()) { Write-Host "No manifest for $env:IMAGE"; exit 0 }
+          Set-Content -Path (Join-Path $env:LOGS 'manifest.json') -Value $raw
+          $m = $raw | ConvertFrom-Json
+          if ($m -is [array]) { $m = $m | Where-Object { $_.Descriptor.platform.os -eq 'windows' } | Select-Object -First 1 }
+          $layers = @(if ($m.SchemaV2Manifest) { $m.SchemaV2Manifest.layers } else { $m.OCIManifest.layers })
+          $sizes = @($layers | Where-Object { $_ } | ForEach-Object { [long]$_.size })
+          if ($sizes.Count -eq 0) {
+            Write-Host '::warning::Could not read layer sizes from the manifest'
+            "MAX_LAYER_GB=unknown" >> $env:GITHUB_ENV
+            exit 0
+          }
+          "MAX_LAYER_GB=$([math]::Round((($sizes | Measure-Object -Maximum).Maximum) / 1GB, 2))" >> $env:GITHUB_ENV
+          "TOTAL_COMPRESSED_GB=$([math]::Round((($sizes | Measure-Object -Sum).Sum) / 1GB, 2))" >> $env:GITHUB_ENV
+          "REGISTRY_LAYERS=$($sizes.Count)" >> $env:GITHUB_ENV
+          $md = @("### S1 ${env:VARIANT}: largest compressed layers", '', '| # | GB | Media type |', '|---|---|---|')
+          $i = 0
+          $indexed = foreach ($l in $layers) { $i++; [pscustomobject]@{ Index = $i; GB = [math]::Round([long]$l.size / 1GB, 2); Type = $l.mediaType } }
+          foreach ($l in ($indexed | Sort-Object GB -Descending | Select-Object -First 10)) {
+            $md += "| $($l.Index) | $($l.GB) | $($l.Type) |"
+          }
+          $md += ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          exit 0
+
+      - name: Summarize
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          $diskCsv = Join-Path $env:LOGS 'disk.csv'
+          $minFree = ''
+          if (Test-Path $diskCsv) {
+            $minFree = (Import-Csv $diskCsv -Header Time, Drive, FreeGB | Group-Object Drive | ForEach-Object {
+              "$($_.Name): $(($_.Group | ForEach-Object { [double]$_.FreeGB } | Measure-Object -Minimum).Minimum) GB"
+            }) -join ', '
+          }
+          $drives = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } | ForEach-Object { "$($_.Name): $([math]::Round($_.Free / 1GB, 1)) GB" }) -join ', '
+          $jobMinutes = if ($env:JOB_START) { [math]::Round(([DateTime]::UtcNow - [DateTime]::Parse($env:JOB_START, $null, 'RoundtripKind')).TotalMinutes, 1) } else { '' }
+          $metrics = [ordered]@{
+            spike = 'S1'; variant = $env:VARIANT; image = $env:IMAGE; image_built = $env:BUILD_OUTCOME -eq 'success'
+            run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; job_minutes = $jobMinutes
+            runner_image = "$env:ImageOS $env:ImageVersion"; host_os = $env:HOST_OS
+            base_image = $env:WINDOWS_BASE_IMAGE; base_os = $env:BASE_OS; base_pull_minutes = $env:BASE_PULL_MINUTES
+            docker_initial_status = $env:DOCKER_INITIAL_STATUS; docker_ready_seconds = $env:DOCKER_READY_SECONDS
+            docker_move_ready_seconds = $env:DOCKER_RESTART_READY_SECONDS; docker_root_dir = $env:DOCKER_ROOT_DIR
+            build_minutes = $env:BUILD_MINUTES; vcpkg_minutes = $env:VCPKG_MINUTES; build_rc = $env:BUILD_RC
+            image_gb = $env:IMAGE_GB; image_layers = $env:IMAGE_LAYERS
+            push_ok = $env:PUSH_OK; push_retries = $env:PUSH_RETRIES; push_minutes = $env:PUSH_MINUTES
+            registry_layers = $env:REGISTRY_LAYERS; max_layer_gb = $env:MAX_LAYER_GB; total_compressed_gb = $env:TOTAL_COMPRESSED_GB
+            min_free_during_build = $minFree; free_at_end = $drives
+          }
+          $metrics | ConvertTo-Json | Set-Content -Path (Join-Path $env:LOGS 'metrics.json')
+          $md = @("### S1 $env:VARIANT", '', '| Metric | Value |', '|---|---|')
+          foreach ($k in $metrics.Keys) { $md += "| $k | $($metrics[$k]) |" }
+          $md += '', 'Pass if: build <= 240 min, largest compressed layer <= 8 GB, push_ok with 0 retries.', ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Log out of ghcr.io
+        if: always()
+        run: |
+          docker logout ghcr.io
+          exit 0
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s1-${{ matrix.variant }}-attempt${{ github.run_attempt }}
+          path: ${{ runner.temp }}/spike-logs
+          retention-days: 14
+
+  # SPIKE (D1 test): the Jenkins path. Builds the image from ltsc2019, as the
+  # jenkinsfile does, under Hyper-V, because a windows-2022 host cannot run
+  # ltsc2019 under process isolation. Build only; nothing is pushed.
+  image-ltsc2019:
+    name: "S1 image (ltsc2019 build arg, Hyper-V)"
+    if: github.repository != 'apache/hadoop'
+    runs-on: windows-2022
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      DOCKER_BUILDKIT: "0"
+    steps:
+      - name: Check out the Docker build context
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            dev-support/docker
+            .github/spike
+
+      - name: Start Docker with the default configuration
+        timeout-minutes: 15
+        run: ./.github/spike/win-docker.ps1
+
+      - name: Move Docker to the D drive
+        timeout-minutes: 15
+        run: ./.github/spike/win-docker.ps1 -DataRoot D
+
+      - name: Build the image from ltsc2019 under Hyper-V
+        timeout-minutes: 320
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'docker-build-ltsc2019.log'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          docker build --isolation=hyperv -m 12g `
+            --build-arg WINDOWS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2019 `
+            --tag hadoop-windows-10-builder:ltsc2019 `
+            --file dev-support/docker/Dockerfile_windows_10 `
+            dev-support/docker 2>&1 | Tee-Object -FilePath $log
+          $rc = $LASTEXITCODE
+          Write-Host "docker build exited with $rc after $([math]::Round($sw.Elapsed.TotalMinutes, 1)) min"
+          if ($rc -ne 0) { exit 1 }
+          docker image inspect hadoop-windows-10-builder:ltsc2019 --format '{{.Os}} {{.OsVersion}}, {{.Size}} bytes'
+          docker run --rm --isolation=hyperv hadoop-windows-10-builder:ltsc2019 /c exit 3
+          $rc = $LASTEXITCODE
+          Write-Host "The entry point returned $rc (expected 3)"
+          if ($rc -ne 3) { exit 1 }
+          exit 0
+
+      # SPIKE (D2 test): the tools D2 installs differently, as the build user.
+      - name: Check the D2 tools in the ltsc2019 image
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failed = @()
+          foreach ($c in 'where git bash rsync python pip mvn cmake java zstd', 'rsync --version', 'pip check') {
+            Write-Host "::group::$c"
+            docker run --rm --isolation=hyperv hadoop-windows-10-builder:ltsc2019 /c @($c -split ' ')
+            $rc = $LASTEXITCODE
+            Write-Host '::endgroup::'
+            Write-Host "$c -> $rc"
+            if ($rc -ne 0) { $failed += $c }
+          }
+          if ($failed) { Write-Host "::error::D2 checks failed: $($failed -join '; ')"; exit 1 }
+          exit 0
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s1-ltsc2019-attempt${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docker-build-ltsc2019.log
+          retention-days: 14
+
+  build:
+    name: "${{ matrix.name }}"
+    needs: image
+    # After a forced rebuild that failed, the tag still names the old image.
+    if: >-
+      ${{ !cancelled() && github.repository != 'apache/hadoop'
+      && (needs.image.result == 'success' || !inputs.force_image_build) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 340
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "S2 windows-2022 slim, Docker on C:"
+            key: w2022-slim-c
+            os: windows-2022
+            variant: slim
+            data_root: C
+            isolation: auto
+            phase1b: false
+          - name: "S2 windows-2022 slim, Docker on D:, Phase 1b"
+            key: w2022-slim-d
+            os: windows-2022
+            variant: slim
+            data_root: D
+            isolation: auto
+            phase1b: true
+          # The fallback for a base the host refuses: can it build Hadoop at
+          # all, and how much slower?
+          - name: "S3 windows-2022 slim, Docker on D:, forced Hyper-V"
+            key: w2022-slim-d-hyperv
+            os: windows-2022
+            variant: slim
+            data_root: D
+            isolation: hyperv
+            phase1b: false
+          # C: has about 28 GB free here, so Docker goes on D:.
+          - name: "S3 windows-2025 slim, Docker on D:"
+            key: w2025-slim-d
+            os: windows-2025
+            variant: slim
+            data_root: D
+            isolation: auto
+            phase1b: false
+    env:
+      VARIANT: ${{ matrix.variant }}
+      KEY: ${{ matrix.key }}
+      DATA_ROOT: ${{ matrix.data_root }}
+      FORCE_ISOLATION: ${{ matrix.isolation }}
+      PHASE1B: ${{ matrix.phase1b }}
+      S1_RESULT: ${{ needs.image.result }}
+    steps:
+      - name: Record the start time and the host
+        run: |
+          "JOB_START=$([DateTime]::UtcNow.ToString('o'))" >> $env:GITHUB_ENV
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $hostOs = "$($cv.CurrentBuild).$($cv.UBR)"
+          "HOST_OS=$hostOs" >> $env:GITHUB_ENV
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Write-Host "OS $($cv.ProductName) build $hostOs, runner image $env:ImageOS $env:ImageVersion, $($cs.NumberOfLogicalProcessors) CPUs, $([math]::Round($cs.TotalPhysicalMemory / 1GB, 1)) GB RAM"
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free / 1GB, 1)}}, @{n='UsedGB';e={[math]::Round($_.Used / 1GB, 1)}} | Out-String | Write-Host
+          # Runners of one label come in VM classes that differ in speed, so
+          # record the CPU and the D: size to tell them apart.
+          $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name -replace '\s+', ' '
+          $d = Get-PSDrive -Name D -PSProvider FileSystem -ErrorAction SilentlyContinue
+          $dSize = if ($d) { "$([math]::Round(($d.Free + $d.Used) / 1GB)) GB" } else { 'none' }
+          $vmClass = "$($cpu.Trim()); D: $dSize" -replace '[^\w .:;@()/+-]', ''
+          "VM_CLASS=$vmClass" >> $env:GITHUB_ENV
+          git config --show-origin --get-all core.autocrlf
+          exit 0
+
+      - name: Enable long paths for git
+        run: git config --system core.longpaths true
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Name the image and directories
+        run: |
+          $context = (git rev-parse HEAD:dev-support/docker).Trim().Substring(0, 12)
+          if ($env:WINDOWS_BASE_IMAGE -notmatch '@sha256:(?<d>[0-9a-f]{64})$') { Write-Host '::error::WINDOWS_BASE_IMAGE must be pinned by digest'; exit 1 }
+          $base = $Matches.d.Substring(0, 8)
+          $name = "$($env:GITHUB_REPOSITORY.ToLowerInvariant())/gha-build-windows_10-spike"
+          "IMAGE=ghcr.io/${name}:$($env:VARIANT)-$context-$base" >> $env:GITHUB_ENV
+          $root = if (Test-Path 'D:\') { 'D:\spike' } else { 'C:\spike' }
+          foreach ($d in 'm2', 'out', 'logs') { New-Item -ItemType Directory -Force -Path (Join-Path $root $d) | Out-Null }
+          "WORK_ROOT=$root" >> $env:GITHUB_ENV
+          "M2_DIR=$root\m2" >> $env:GITHUB_ENV
+          "OUT_DIR=$root\out" >> $env:GITHUB_ENV
+          "LOGS=$root\logs" >> $env:GITHUB_ENV
+
+      - name: Start Docker
+        timeout-minutes: 15
+        run: ./.github/spike/win-docker.ps1 -DataRoot $env:DATA_ROOT
+
+      # v2: runs 1-2 saved an empty repository under the v1 key, and an exact
+      # hit never saves again.
+      - name: Restore the Maven repository
+        id: m2
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.M2_DIR }}
+          key: spike-windows-m2-v2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: spike-windows-m2-v2-
+
+      - name: Measure the restored Maven repository
+        run: |
+          $bytes = (Get-ChildItem -Path $env:M2_DIR -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+          "M2_RESTORED_MB=$([math]::Round([double]$bytes / 1MB))" >> $env:GITHUB_ENV
+
+      # Under process isolation the container user's access to bind mounts is
+      # checked against the host ACLs. Granting on the roots is enough: the
+      # inheritable entries reach existing children, and no path is long.
+      - name: Grant the container user access to the mounts
+        run: |
+          $failed = @()
+          foreach ($sid in '*S-1-5-11', '*S-1-5-32-545') {
+            foreach ($dir in $env:M2_DIR, $env:OUT_DIR) {
+              icacls $dir /grant "${sid}:(OI)(CI)M" /Q | Out-Null
+              if ($LASTEXITCODE -ne 0) { $failed += "$dir $sid" }
+            }
+            icacls $env:GITHUB_WORKSPACE /grant "${sid}:(OI)(CI)RX" /Q | Out-Null
+            if ($LASTEXITCODE -ne 0) { $failed += "$env:GITHUB_WORKSPACE $sid" }
+          }
+          if ($failed) { Write-Host "::warning title=infra::icacls failed for: $($failed -join '; ')" }
+          icacls $env:GITHUB_WORKSPACE
+          exit 0
+
+      - name: Pull the image
+        timeout-minutes: 30
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:GHCR_TOKEN | docker login ghcr.io --username $env:GITHUB_ACTOR --password-stdin
+          $log = Join-Path $env:LOGS 'docker-pull.log'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          docker pull $env:IMAGE 2>&1 | Tee-Object -FilePath $log
+          $rc = $LASTEXITCODE
+          $minutes = [math]::Round($sw.Elapsed.TotalMinutes, 1)
+          docker logout ghcr.io
+          if ($rc -ne 0) { Write-Host "::error::Could not pull $env:IMAGE; did S1 $env:VARIANT push it?"; exit 1 }
+          "PULL_MINUTES=$minutes" >> $env:GITHUB_ENV
+          $reused = @(Select-String -Path $log -Pattern 'Already exists').Count
+          $downloaded = @(Select-String -Path $log -Pattern 'Pull complete').Count
+          "PULL_LAYERS=reused $reused, downloaded $downloaded" >> $env:GITHUB_ENV
+          "IMAGE_DIGEST=$(docker image inspect $env:IMAGE --format '{{index .RepoDigests 0}}')" >> $env:GITHUB_ENV
+          "IMAGE_OS=$(docker image inspect $env:IMAGE --format '{{.OsVersion}}')" >> $env:GITHUB_ENV
+          exit 0
+
+      # Hyper-V only when process isolation is refused for an OS mismatch; any
+      # other failure gets one Docker restart, the runner-images#13729 remedy.
+      # 0xc0370101 is the mismatch error itself; 0xc0370106 is any unexpected
+      # exit, so it counts as a mismatch only when the image's revision is
+      # newer than the host's. An older one is supported.
+      - name: Check the entry point and isolation
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Test-EntryPoint([string[]] $Extra) {
+            $out = docker run --rm @Extra $env:IMAGE /c exit 3 2>&1 | Out-String
+            [pscustomobject]@{ Rc = $LASTEXITCODE; Out = $out }
+          }
+          $i = $env:IMAGE_OS -split '\.'; $h = $env:HOST_OS -split '\.'
+          $skew = $i.Count -eq 4 -and $i[2] -eq $h[0] -and [int]$i[3] -gt [int]$h[1]
+          function Test-Mismatch($p) { $p.Out -match '0xc0370101|does not match the host' -or ($skew -and $p.Out -match '0xc0370106') }
+          $isolation = 'process'
+          if ($env:FORCE_ISOLATION -eq 'hyperv') {
+            $isolation = 'hyperv'
+            $p = Test-EntryPoint @('--isolation=hyperv', '--cpu-count', '4')
+          } else {
+            $p = Test-EntryPoint @()
+            if ($p.Rc -ne 3 -and -not (Test-Mismatch $p)) {
+              Write-Host "::warning title=infra::The entry-point probe returned $($p.Rc); restarting Docker and retrying once"
+              Write-Host $p.Out
+              ./.github/spike/win-docker.ps1 -Restart
+              $p = Test-EntryPoint @()
+            }
+            if ($p.Rc -ne 3 -and (Test-Mismatch $p)) {
+              Write-Host "::warning title=infra::Process isolation refused (host $env:HOST_OS, image $env:IMAGE_OS); using Hyper-V isolation"
+              Write-Host $p.Out
+              $isolation = 'hyperv'
+              $p = Test-EntryPoint @('--isolation=hyperv', '--cpu-count', '4')
+            }
+          }
+          if ($p.Rc -ne 3) { Write-Host "::error::The entry point returned $($p.Rc) instead of 3"; Write-Host $p.Out; exit 1 }
+          "DOCKER_ISOLATION=$isolation" >> $env:GITHUB_ENV
+          $runArgs = @("--isolation=$isolation")
+          if ($isolation -eq 'hyperv') {
+            $runArgs += '--cpu-count', '4'
+            "DOCKER_CPU_COUNT=4" >> $env:GITHUB_ENV
+            "CONTAINER_MEMORY=12g" >> $env:GITHUB_ENV
+          } else {
+            "CONTAINER_MEMORY=14g" >> $env:GITHUB_ENV
+          }
+          docker run --rm @runArgs $env:IMAGE /c where cmake mvn java bash tar git
+          "TOOLS_OK=$($LASTEXITCODE -eq 0)" >> $env:GITHUB_ENV
+          docker run --rm @runArgs $env:IMAGE /c whoami
+          docker run --rm @runArgs $env:IMAGE /c ver
+          exit 0
+
+      # Data for S3: what the Hyper-V fallback gets by default, and whether
+      # process isolation runs the current servercore:ltsc2022 on this host.
+      # After a Patch Tuesday that tag is newer than the host. (Runs 1-2 used
+      # nanoserver, which tolerates skew that servercore does not.)
+      # No argument may contain a space: the entry point runs under cmd /c,
+      # which strips the outer quotes once the line holds more than two.
+      - name: Probe Hyper-V and the current base revision
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $o = docker run --rm --isolation=hyperv $env:IMAGE /c systeminfo 2>&1 | Out-String
+          $rc = $LASTEXITCODE
+          $mem = if ($o -match 'Total Physical Memory:\s+(?<mb>[\d,.]+)\s*MB') { "$($Matches.mb -replace '[,.]', '') MB" } else { 'unknown memory' }
+          Write-Host "Hyper-V default: rc $rc, $mem"
+          "HYPERV_PROBE=default rc $rc $mem" >> $env:GITHUB_ENV
+          $probe = 'mcr.microsoft.com/windows/servercore:ltsc2022'
+          docker pull $probe | Out-Null
+          $probeOs = docker image inspect $probe --format '{{.OsVersion}}'
+          docker run --rm --isolation=process $probe cmd /c exit 3 2>&1 | Out-Host
+          "SKEW_PROBE=servercore $probeOs on host $env:HOST_OS, process isolation rc $LASTEXITCODE" >> $env:GITHUB_ENV
+          exit 0
+
+      - name: Check that the container user can use the mounts
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:DOCKER_ISOLATION -eq 'hyperv') {
+            Write-Host 'Hyper-V isolation reads mounts as LocalSystem, so this probe would prove nothing'
+            "ACL_OK=n/a (hyperv)" >> $env:GITHUB_ENV
+            exit 0
+          }
+          $m2 = "$($env:M2_DIR):C:\Users\HadoopBuilder\.m2\repository"
+          $out = "$($env:OUT_DIR):C:\out"
+          $src = "$($env:GITHUB_WORKSPACE):C:\src:ro"
+          docker run --rm --isolation=process -v $m2 $env:IMAGE /c copy /y NUL C:\Users\HadoopBuilder\.m2\repository\acl-probe.txt
+          docker run --rm --isolation=process -v $out $env:IMAGE /c copy /y NUL C:\out\acl-probe.txt
+          docker run --rm --isolation=process -v $src $env:IMAGE /c dir C:\src\pom.xml
+          $srcRc = $LASTEXITCODE
+          $ok = (Test-Path "$env:M2_DIR\acl-probe.txt") -and (Test-Path "$env:OUT_DIR\acl-probe.txt") -and $srcRc -eq 0
+          Remove-Item -Force -ErrorAction SilentlyContinue "$env:M2_DIR\acl-probe.txt", "$env:OUT_DIR\acl-probe.txt"
+          "ACL_OK=$ok" >> $env:GITHUB_ENV
+          if (-not $ok) { Write-Host '::error::HadoopBuilder cannot write to the mounted directories or read the sources'; exit 1 }
+          exit 0
+
+      # The step timeout leaves the job time to report; the verdict comes from
+      # the last step, so this step only records the exit code.
+      - name: Build and run the smoke test in the container
+        id: build
+        timeout-minutes: 260
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $p1b = if ($env:PHASE1B -eq 'true') { '1' } else { '0' }
+          $runArgs = @("--isolation=$env:DOCKER_ISOLATION")
+          if ($env:DOCKER_CPU_COUNT) { $runArgs += '--cpu-count', $env:DOCKER_CPU_COUNT }
+          $sampler = Start-ThreadJob -ArgumentList (Join-Path $env:LOGS 'disk.csv') -ScriptBlock {
+            param($path)
+            while ($true) {
+              $now = [DateTime]::UtcNow.ToString('o')
+              Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } |
+                ForEach-Object { '{0},{1},{2}' -f $now, $_.Name, [math]::Round($_.Free / 1GB, 2) } |
+                Add-Content -Path $path
+              Start-Sleep -Seconds 60
+            }
+          }
+          $log = Join-Path $env:LOGS 'container.log'
+          $writer = [IO.StreamWriter]::new($log, $false, [Text.UTF8Encoding]::new($false))
+          $writer.AutoFlush = $true
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          try {
+            docker run --rm @runArgs --memory $env:CONTAINER_MEMORY `
+              --env "WIN_CI_PHASE1B=$p1b" `
+              --volume "$($env:GITHUB_WORKSPACE):C:\src:ro" `
+              --volume "$($env:M2_DIR):C:\Users\HadoopBuilder\.m2\repository" `
+              --volume "$($env:OUT_DIR):C:\out" `
+              $env:IMAGE /c C:\src\dev-support\bin\win-ci-build.cmd 2>&1 |
+              ForEach-Object {
+                $line = '[{0}] {1}' -f [DateTime]::UtcNow.ToString('o'), $_
+                $writer.WriteLine($line)
+                $line
+              }
+            $rc = $LASTEXITCODE
+          } finally {
+            $writer.Dispose()
+            Stop-Job $sampler
+            Remove-Job $sampler -Force
+          }
+          "CONTAINER_MINUTES=$([math]::Round($sw.Elapsed.TotalMinutes, 1))" >> $env:GITHUB_ENV
+          "CONTAINER_RC=$rc" >> $env:GITHUB_ENV
+          Write-Host "Container exit code $rc"
+          exit 0
+
+      # After a step timeout the container keeps running without its client.
+      - name: Stop leftover containers
+        if: always()
+        timeout-minutes: 5
+        run: |
+          $ids = @(docker ps -q 2>$null)
+          if ($ids) { docker stop --time 30 @ids | Out-Null }
+          exit 0
+
+      - name: Check the binaries and the smoke test
+        if: always() && steps.build.outcome != 'skipped'
+        run: |
+          $bin = Join-Path $env:OUT_DIR 'bin'
+          $found = @(Get-ChildItem -Path $bin -Recurse -File -Include winutils.exe, hadoop.dll, hdfs.dll -ErrorAction SilentlyContinue)
+          $found | ForEach-Object { Write-Host $_.FullName.Substring($bin.Length) }
+          # The distribution has to carry all three, not just the module builds.
+          $inDist = @($found | Where-Object { $_.FullName -match '\\hadoop-dist\\target\\hadoop-[^\\]+\\' })
+          $missing = @('winutils.exe', 'hadoop.dll', 'hdfs.dll' | Where-Object { $n = $_; -not ($inDist | Where-Object Name -eq $n) })
+          "BINARIES_MISSING=$($missing -join ' ')" >> $env:GITHUB_ENV
+          $smoke = 'no report'
+          $smokeOk = $false
+          $xml = Get-ChildItem -Path (Join-Path $env:OUT_DIR 'reports') -Recurse -File -Filter 'TEST-org.apache.hadoop.fs.TestHdfsNativeCodeLoader.xml' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($xml) {
+            try {
+              $suite = ([xml](Get-Content -Raw $xml.FullName)).testsuite
+              $t = [int]$suite.tests; $f = [int]$suite.failures; $e = [int]$suite.errors; $s = [int]$suite.skipped
+              # The test returns early, and passes, when require.test.libhadoop
+              # does not reach it, so also require its "loaded" log line.
+              $loaded = [bool](Get-ChildItem -Path $xml.DirectoryName -File -Filter '*TestHdfsNativeCodeLoader*' |
+                Select-String -SimpleMatch 'TestHdfsNativeCodeLoader: libhadoop.so is loaded' -List)
+              $smoke = "tests=$t failures=$f errors=$e skipped=$s loaded=$loaded"
+              $smokeOk = $t -gt 0 -and $f -eq 0 -and $e -eq 0 -and $s -eq 0 -and $loaded
+            } catch {
+              $smoke = 'unreadable report'
+            }
+          }
+          "SMOKE=$smoke" >> $env:GITHUB_ENV
+          "SMOKE_OK=$smokeOk" >> $env:GITHUB_ENV
+          exit 0
+
+      - name: Summarize Phase 1b
+        if: always() && env.PHASE1B == 'true' && steps.build.outcome != 'skipped'
+        run: |
+          $rcs = foreach ($module in 'hadoop-common', 'hadoop-hdfs', 'hadoop-yarn-common') {
+            $file = Join-Path $env:OUT_DIR "phase1b-$module-rc.txt"
+            $rc = if (Test-Path $file) { (Get-Content -Raw $file).Trim() } else { 'not run' }
+            if ($rc -ne 'not run' -and $rc -notmatch '^-?\d{1,10}$') { $rc = 'invalid' }
+            "$module $rc"
+          }
+          "PHASE1B_RC=$($rcs -join ', ')" >> $env:GITHUB_ENV
+          $expected = 'TestWinUtils', 'TestNativeIO', 'TestNativeCrc32', 'TestShell', 'TestFileUtil', 'TestLocalFileSystem', 'TestPath',
+            'TestPathData', 'TestFsShellCopy', 'TestSymlinkLocalFSFileSystem', 'TestAtomicFileOutputStream', 'TestWindowsBasedProcessTree'
+          $md = @("### Phase 1b on ${env:KEY} (Maven exit codes: $($rcs -join ', '))", '', '| Test class | Tests | Failures | Errors | Skipped |', '|---|---|---|---|---|')
+          $seen = @()
+          $reports = Get-ChildItem -Path (Join-Path $env:OUT_DIR 'reports') -Recurse -File -Filter 'TEST-*.xml' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -cmatch '^TEST-' -and $_.Name -ne 'TEST-org.apache.hadoop.fs.TestHdfsNativeCodeLoader.xml' }
+          foreach ($r in ($reports | Sort-Object Name)) {
+            try { $s = ([xml](Get-Content -Raw $r.FullName)).testsuite } catch { continue }
+            if (-not $s) { continue }
+            $seen += ($s.name -split '\.')[-1]
+            $md += "| $($s.name) | $([int]$s.tests) | $([int]$s.failures) | $([int]$s.errors) | $([int]$s.skipped) |"
+          }
+          $notRun = @($expected | Where-Object { $_ -notin $seen })
+          if ($notRun) {
+            $md += '', "No report for: $($notRun -join ', ')"
+            "PHASE1B_NOT_RUN=$($notRun -join ' ')" >> $env:GITHUB_ENV
+          }
+          $md += ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+          exit 0
+
+      - name: Summarize
+        if: always()
+        env:
+          M2_CACHE_HIT: ${{ steps.m2.outputs.cache-hit }}
+        run: |
+          # Phase durations from the script's markers in container.log. The
+          # second bracket must end in the script's %TIME% (hh:mm:ss.cc), or
+          # Maven's "[INFO] Done in 4.21s." from a yarn install would match.
+          $phases = [ordered]@{}
+          $log = Join-Path $env:LOGS 'container.log'
+          if (Test-Path $log) {
+            $marks = foreach ($line in [IO.File]::ReadLines($log)) {
+              if ($line -match '^\[(?<ts>[^\]]+)\] \[[^\]]*\d\d\.\d\d\] (?<what>Copying|Building Hadoop|Phase 1: |Phase 1b: hadoop-common|Collecting outputs|Done, exit code)') {
+                [pscustomobject]@{ At = [DateTime]::Parse($Matches.ts, $null, 'RoundtripKind'); What = $Matches.what.Trim() }
+              }
+            }
+            $first = @{}
+            foreach ($m in $marks) { if (-not $first.ContainsKey($m.What)) { $first[$m.What] = $m.At } }
+            function Span($from, $to) { if ($first[$from] -and $first[$to]) { [math]::Round(($first[$to] - $first[$from]).TotalMinutes, 1) } else { '' } }
+            $phases['copy_minutes'] = Span 'Copying' 'Building Hadoop'
+            $phases['maven_build_minutes'] = Span 'Building Hadoop' 'Collecting outputs'
+            $phases['phase1_minutes'] = if ($first['Phase 1:']) { $after = @($marks | Where-Object { $_.At -gt $first['Phase 1:'] -and $_.What -eq 'Collecting outputs' } | Select-Object -First 1); if ($after) { [math]::Round(($after[0].At - $first['Phase 1:']).TotalMinutes, 1) } else { '' } } else { '' }
+            $phases['phase1b_minutes'] = Span 'Phase 1b: hadoop-common' 'Done, exit code'
+            # The first Reactor Summary is the full build's.
+            $text = Get-Content -Raw $log
+            if ($text -match '(?s)Reactor Summary.*?BUILD (SUCCESS|FAILURE)') {
+              $modules = @(($Matches[0] -split "`r?`n") | Where-Object { $_ -match ' (SUCCESS \[|FAILURE \[|SKIPPED\s*$)' -and $_ -notmatch 'BUILD (SUCCESS|FAILURE)' })
+              $phases['modules_ok'] = @($modules | Where-Object { $_ -match ' SUCCESS \[' }).Count
+              $phases['modules_total'] = $modules.Count
+            }
+          }
+          $diskCsv = Join-Path $env:LOGS 'disk.csv'
+          $minFree = ''
+          if (Test-Path $diskCsv) {
+            $minFree = (Import-Csv $diskCsv -Header Time, Drive, FreeGB | Group-Object Drive | ForEach-Object {
+              "$($_.Name): $(($_.Group | ForEach-Object { [double]$_.FreeGB } | Measure-Object -Minimum).Minimum) GB"
+            }) -join ', '
+          }
+          # For the final gate.
+          foreach ($k in 'maven_build_minutes', 'modules_ok', 'modules_total') {
+            if ("$($phases[$k])" -match '^\d+(\.\d+)?$') { "$($k.ToUpperInvariant())=$($phases[$k])" >> $env:GITHUB_ENV }
+          }
+          $drives = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } | ForEach-Object { "$($_.Name): $([math]::Round($_.Free / 1GB, 1)) GB" }) -join ', '
+          $jobMinutes = if ($env:JOB_START) { [math]::Round(([DateTime]::UtcNow - [DateTime]::Parse($env:JOB_START, $null, 'RoundtripKind')).TotalMinutes, 1) } else { '' }
+          $metrics = [ordered]@{
+            spike = if ($env:KEY -like 'w2025*' -or $env:FORCE_ISOLATION -eq 'hyperv') { 'S3' } else { 'S2' }; key = $env:KEY
+            run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; job_minutes = $jobMinutes
+            runner_image = "$env:ImageOS $env:ImageVersion"; host_os = $env:HOST_OS; vm_class = $env:VM_CLASS
+            image = $env:IMAGE; image_os = $env:IMAGE_OS; image_digest = $env:IMAGE_DIGEST; s1_result = $env:S1_RESULT
+            docker_initial_status = $env:DOCKER_INITIAL_STATUS; docker_ready_seconds = $env:DOCKER_READY_SECONDS
+            docker_restart_ready_seconds = $env:DOCKER_RESTART_READY_SECONDS; docker_root_dir = $env:DOCKER_ROOT_DIR
+            work_root = $env:WORK_ROOT; m2_cache_hit = $env:M2_CACHE_HIT; m2_restored_mb = $env:M2_RESTORED_MB
+            pull_minutes = $env:PULL_MINUTES; pull_layers = $env:PULL_LAYERS
+            isolation = $env:DOCKER_ISOLATION; tools_ok = $env:TOOLS_OK; acl_ok = $env:ACL_OK
+            hyperv_probe = $env:HYPERV_PROBE; skew_probe = $env:SKEW_PROBE
+            container_minutes = $env:CONTAINER_MINUTES; container_rc = $env:CONTAINER_RC
+          }
+          foreach ($k in $phases.Keys) { $metrics[$k] = $phases[$k] }
+          $metrics['binaries_missing'] = $env:BINARIES_MISSING
+          $metrics['smoke'] = $env:SMOKE
+          $metrics['phase1b_rc'] = $env:PHASE1B_RC
+          $metrics['min_free_during_build'] = $minFree
+          $metrics['free_at_end'] = $drives
+          $metrics | ConvertTo-Json | Set-Content -Path (Join-Path $env:LOGS 'metrics.json')
+          $md = @("### $env:KEY", '', '| Metric | Value |', '|---|---|')
+          foreach ($k in $metrics.Keys) { $md += "| $k | $($metrics[$k]) |" }
+          $timeline = Join-Path $env:OUT_DIR 'timeline.txt'
+          if (Test-Path $timeline) { $md += '', '```'; $md += @(Get-Content $timeline); $md += '```' }
+          $md += '', 'Pass if: modules_ok = modules_total, maven_build_minutes <= 150, no binaries missing, smoke loaded=True, acl_ok.', ''
+          $md -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Log out of ghcr.io
+        if: always()
+        run: |
+          docker logout ghcr.io
+          exit 0
+
+      - name: Upload logs and reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.key }}-attempt${{ github.run_attempt }}
+          path: |
+            ${{ env.LOGS }}
+            ${{ env.OUT_DIR }}
+          retention-days: 14
+
+      # Only a complete build leaves a usable repository. The reactor's
+      # snapshots are dropped so the cache never serves stale ones; released
+      # org.apache.hadoop artifacts such as hadoop-thirdparty stay.
+      # format() keeps the comparison a string one: GitHub turns a null or ''
+      # and '0' both into the number 0, which once saved an empty repository.
+      - name: Prune the Maven repository
+        id: prune
+        if: >-
+          !cancelled() && steps.build.outcome == 'success' && steps.m2.outputs.cache-hit != 'true'
+          && (format('{0}', env.CONTAINER_RC) == '0' || format('{0}', env.CONTAINER_RC) == '20')
+        run: |
+          $hadoop = Join-Path $env:M2_DIR 'org\apache\hadoop'
+          @(Get-ChildItem -Path $hadoop -Directory -Recurse -Filter '*-SNAPSHOT' -ErrorAction SilentlyContinue) |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          $bytes = (Get-ChildItem -Path $env:M2_DIR -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+          $mb = [math]::Round([double]$bytes / 1MB)
+          Write-Host "Maven repository to save: $mb MB"
+          if ($mb -lt 500) {
+            Write-Host "::warning::Only $mb MB in the Maven repository; not saving it"
+            'save=false' >> $env:GITHUB_OUTPUT
+          } else {
+            'save=true' >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Save the Maven repository
+        if: ${{ !cancelled() && steps.prune.outputs.save == 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.M2_DIR }}
+          key: ${{ steps.m2.outputs.cache-primary-key }}
+
+      # Enforces the S2 pass criteria that Summarize prints, except
+      # maven_build_minutes <= 150, which is a warning while the Hyper-V leg
+      # finds out how slow that path is.
+      - name: Fail the job if the build or a check failed
+        if: always()
+        run: |
+          $problems = @()
+          if ($env:CONTAINER_RC -ne '0') { $problems += "container exit code '$env:CONTAINER_RC'" }
+          if ($env:BINARIES_MISSING) { $problems += "not in the distribution: $env:BINARIES_MISSING" }
+          if ($env:SMOKE_OK -ne 'True') { $problems += "smoke test: $env:SMOKE" }
+          if ($env:TOOLS_OK -ne 'True') { $problems += 'tools missing from the image' }
+          if (-not $env:MODULES_TOTAL -or $env:MODULES_OK -ne $env:MODULES_TOTAL) { $problems += "modules $env:MODULES_OK of $env:MODULES_TOTAL" }
+          if ($env:PHASE1B -eq 'true' -and $env:PHASE1B_RC -ne 'hadoop-common 0, hadoop-hdfs 0, hadoop-yarn-common 0') { $problems += "Phase 1b: $env:PHASE1B_RC" }
+          if ($env:PHASE1B -eq 'true' -and $env:PHASE1B_NOT_RUN) { $problems += "Phase 1b classes not run: $env:PHASE1B_NOT_RUN" }
+          if ($env:MAVEN_BUILD_MINUTES -and [double]$env:MAVEN_BUILD_MINUTES -gt 150) {
+            Write-Host "::warning::The Maven build took $env:MAVEN_BUILD_MINUTES minutes, over the 150-minute target"
+          }
+          if ($problems) { Write-Host "::error::$($problems -join '; ')"; exit 1 }
