@@ -184,18 +184,25 @@ RUN powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $ProgressPr
     C:\ZStd\zstd.exe --version; if ($LASTEXITCODE -ne 0) { throw 'zstd --version failed' }; \
     Remove-Item $f -Force"
 
-# Install rsync 3.5.1 from MSYS2 into Git's usr\bin, whose MSYS2 runtime and
+# Install rsync 3.5.2 from MSYS2 into Git's usr\bin, whose MSYS2 runtime and
 # DLLs rsync uses. Git for Windows has all of rsync's DLLs except those of
-# libxxhash and popt, so install those packages too. MSYS2 publishes
-# SHA-256 b402bd1d03815c5e28b7ab415d8e20f487eff2460ae0271a99674eeb0d77194f for
-# popt-1.19-1. A Git for Windows update can change the DLLs it ships, and a
-# missing one only shows when rsync starts, so check that it starts and can
-# copy files, which is what Yetus uses it for.
-ENV LIBXXHASH_SHA512 a6d7a05aa94836abf0b5bc611db08217b4d1207feb539d9c18692fa9269bb255d6ee877bc146a2b2a177299bc0456c370af3356cd4dfbcf212e2182773494b2f
+# libxxhash and popt, so install those packages too, at the versions MSYS2
+# built rsync against. MSYS2 publishes SHA-256
+# ba784ad117626401cd5d3ec0cf70399f9de72a63755f96c28fa2032303f9c330 for
+# libxxhash-0.8.4-1 and
+# b402bd1d03815c5e28b7ab415d8e20f487eff2460ae0271a99674eeb0d77194f for
+# popt-1.19-1. Take rsync-3.5.2-1, not MSYS2's newer 3.5.2-2, which links
+# msys-crypto-4.dll (OpenSSL 4); Git for Windows ships OpenSSL 3. MSYS2's
+# package database no longer lists 3.5.2-1, so RSYNC_SHA512 is from a download
+# that matched MSYS2's signature.
+# A Git for Windows update can change the DLLs it ships, and a missing one only
+# shows when rsync starts, so check that it starts and can copy files, which is
+# what Yetus uses it for.
+ENV LIBXXHASH_SHA512 1e68bbdff3b5fea2b8de7887c44b229e4f0d8fa0879eb02f5527ea762e3a62002e11a1f19df017b7dca62460bc4728bc8ce98869fdc05b5665e5868e58221f77
 ENV POPT_SHA512 a4addf138fe7d5bd7d6ae1e6eee79151ddc6da9cf6e0394298f800eee6554f204beaaaee48975c153f3e5047b81e3f4218f70b9c35a433a9d37f100d9de24eae
-ENV RSYNC_SHA512 a8da994228c325027a20e0c8bf71a177faf038624e5be06e752b8a0d93f52ade7c594956d63178a75f3010b153d883238048fd76fee49ec2562989b8e97b080c
+ENV RSYNC_SHA512 504eca351d16d5280e060614e17ccb1d002f32c7e28dba69431dc567aee33839069bafcd2563143be434f6e7dd3d4068bc1b166d56c127d7530b73b2c3d4cc67
 RUN powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; \
-    $packages = [ordered]@{ 'libxxhash-0.8.3-1' = $Env:LIBXXHASH_SHA512; 'popt-1.19-1' = $Env:POPT_SHA512; 'rsync-3.5.1-2' = $Env:RSYNC_SHA512 }; \
+    $packages = [ordered]@{ 'libxxhash-0.8.4-1' = $Env:LIBXXHASH_SHA512; 'popt-1.19-1' = $Env:POPT_SHA512; 'rsync-3.5.2-1' = $Env:RSYNC_SHA512 }; \
     foreach ($name in $packages.Keys) { \
         $file = $name + '-x86_64.pkg.tar.zst'; $zst = Join-Path $Env:TEMP $file; $tar = Join-Path $Env:TEMP ($name + '.tar'); $dir = Join-Path $Env:TEMP $name; \
         Invoke-WebRequest -UseBasicParsing -Uri ('https://repo.msys2.org/msys/x86_64/' + $file) -OutFile $zst; \
@@ -209,26 +216,28 @@ RUN powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $ProgressPr
     C:\Git\usr\bin\rsync.exe --version; if ($LASTEXITCODE -ne 0) { throw 'rsync --version failed' }; \
     C:\Git\bin\bash.exe -ec 'rsync -a /etc/profile.d/ /tmp/rsync-check/; rm -rf /tmp/rsync-check'; if ($LASTEXITCODE -ne 0) { throw 'rsync could not copy files' }"
 
-## Install Python 3.11.8.
+## Install Python 3.11.9.
 # The Python installation steps below are derived from -
 # https://github.com/docker-library/python/blob/105d6f34e7d70aad6f8c3e249b8208efa591916a/3.11/windows/windowsservercore-ltsc2022/Dockerfile
+# 3.11.9 is the last Python 3.11 release with a Windows installer; later 3.11
+# releases are source only.
 # python.org lists only an MD5 digest for this installer, plus a Sigstore
 # bundle that carries its SHA-256; PYTHON_SHA512 is from a download that
 # matched both.
 # get-pip.py installs pip and setuptools offline from the two wheels below,
 # not from PyPI by version alone. PyPI publishes SHA-256
-# ba0d021a166865d2265246961bec0152ff124de910c5cc39f1156ce3fa7c69dc and
-# d0b9a8433464d5800cbe05094acf5c6d52a91bfac9b52bcfc4d41382be5d5d31 for them.
+# f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13 and
+# ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2 for them.
 COPY pkg-resolver/install-python.ps1 pkg-resolver/install-pip.ps1 pkg-resolver/
 ENV PYTHONIOENCODING UTF-8
-ENV PYTHON_VERSION 3.11.8
-ENV PYTHON_SHA512 e6bdbae1affd161e62fc87407c912462dfe875f535ba9f344d0c4ade13715c947cd3ae832eff60f1bad4161938311d06ac8bc9b52ef203f7b0d9de1409f052a5
-ENV PYTHON_PIP_VERSION 24.0
-ENV PYTHON_PIP_URL https://files.pythonhosted.org/packages/8a/6a/19e9fe04fca059ccf770861c7d5721ab4c2aebc539889e97c7977528a53b/pip-24.0-py3-none-any.whl
-ENV PYTHON_PIP_SHA512 5d7462a584105bccaa9cf376f5a8c5827ead099c813c8af7392d478a4398f373d9e8cac7bbad2db51b335411ab966b21e119b1b1234c9a7ab70c6ddfc9306da6
-ENV PYTHON_SETUPTOOLS_VERSION 65.5.1
-ENV PYTHON_SETUPTOOLS_URL https://files.pythonhosted.org/packages/b6/40/353c051f77ee5618adaf1fd96f4f6bae9714ed0a22c7142c01c24eb77fe4/setuptools-65.5.1-py3-none-any.whl
-ENV PYTHON_SETUPTOOLS_SHA512 8fe0472001b1589caf81f1e0fe17777e524f003fc414d0a17a431209ba5aa8292741bdf13ae4346227afba2491099ea7369bf767ce621ef3fa38dda7b304b5c0
+ENV PYTHON_VERSION 3.11.9
+ENV PYTHON_SHA512 897a14d5ee5cbc6781a0f48beffc27807a4f789d58c4329d899233f615d168a5dcceddf7f8f2d5bb52212ddcf3eba4664590d9f1fdb25bb5201f44899e03b2f7
+ENV PYTHON_PIP_VERSION 26.3
+ENV PYTHON_PIP_URL https://files.pythonhosted.org/packages/07/25/ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/pip-26.3-py3-none-any.whl
+ENV PYTHON_PIP_SHA512 9b62c45019e6d96c1af22832531205450ad4cfbd0683bbbc1c348fe8bc4327c23bfc9f4e40d99e7caa98a00d499f1832e63a7c0d2ef03f71eb8e94f594db8204
+ENV PYTHON_SETUPTOOLS_VERSION 84.2.1
+ENV PYTHON_SETUPTOOLS_URL https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl
+ENV PYTHON_SETUPTOOLS_SHA512 9ee5f92cffe115ef3cfcb3c9db28324062bbf54b69807035063275d38ba5f61a839a0085e11b713fdb5c8c0d2de876d36bae22c36c3acbebdec3b5400cb53ae1
 ENV PYTHON_GET_PIP_URL https://github.com/pypa/get-pip/raw/dbf0c85f76fb6e1ab42aa672ffca6f0a675d9ee4/public/get-pip.py
 ENV PYTHON_GET_PIP_SHA256 dfe9fd5c28dc98b5ac17979a953ea550cec37ae1b47a5116007395bfacff2ab9
 RUN powershell Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
